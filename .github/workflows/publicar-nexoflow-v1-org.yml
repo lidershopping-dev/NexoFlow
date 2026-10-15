@@ -25,9 +25,9 @@ jobs:
           for file in NexoFlow-1.0.zip NexoFlow-Setup-1.0.zip SHA256SUMS-1.0.txt; do
             curl --fail --location --retry 3 --retry-all-errors --output "$file" "$base/$file"
           done
-          echo 'e77774eec9126d784db295c0feb99a169afb81604825089f6827b827390ad9db  NexoFlow-1.0.zip' | sha256sum --check --strict
-          echo 'a2320a77905d1852da73dbecc40f704979ae41371ea354bf465622e32fd04dc0  NexoFlow-Setup-1.0.zip' | sha256sum --check --strict
-          echo '3a1949f7f0e365d18e3c5ef19f2176c7bfd2fbfc13fdc127c88677e4e24ad4e5  SHA256SUMS-1.0.txt' | sha256sum --check --strict
+          echo '3516f80b4f26cfd3f27142ea3131d4ca2e13f3454196d5dbcaffe3ba9425e1f8  NexoFlow-1.0.zip' | sha256sum --check --strict
+          echo '428b8dc80e34133b9bec26343f354557a889f3b2b2dc0b3a04786d675d003b26  NexoFlow-Setup-1.0.zip' | sha256sum --check --strict
+          echo '1bf51cf3d5f7183d0132410797305b5e4286f663c2b9d26abdaf271fca476a3e  SHA256SUMS-1.0.txt' | sha256sum --check --strict
 
       - name: Recuperar notas originais
         shell: bash

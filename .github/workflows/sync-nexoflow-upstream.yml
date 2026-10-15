@@ -1,0 +1,89 @@
+name: Sincronizar NexoFlow original
+
+on:
+  schedule:
+    - cron: "17 9 * * *" # Diariamente 06:17 America/Belem
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/sync-nexoflow-upstream.yml
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sincronizar-nexoflow-original
+  cancel-in-progress: false
+
+jobs:
+  sincronizar-codigo:
+    name: Propor atualizacoes do codigo por Pull Request
+    if: github.repository == 'lidershopping-dev/NexoFlow'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout completo do fork
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Comparar original e criar ou atualizar PR
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/felipetelesbarbosa/NexoFlow.git
+          git fetch --no-tags upstream main
+          git fetch --no-tags origin main
+          if git merge-base --is-ancestor refs/remotes/upstream/main refs/remotes/origin/main; then
+            echo "O fork ja contem a versao atual do codigo original."
+            exit 0
+          fi
+
+          branch="sync/upstream-main"
+          pr="$(gh pr list --repo "$GITHUB_REPOSITORY" --head "$branch" --base main --state open --json number --jq '.[0].number // empty')"
+          git fetch --no-tags origin "refs/heads/$branch:refs/remotes/origin/$branch" || true
+
+          if git show-ref --verify --quiet "refs/remotes/origin/$branch" &&
+             git merge-base --is-ancestor refs/remotes/upstream/main "refs/remotes/origin/$branch"; then
+            echo "A branch de sincronizacao ja contem a main original."
+          else
+            git checkout -B "$branch" refs/remotes/origin/main
+            # Merge preserva as configuracoes proprias do fork e o historico original.
+            # Conflitos interrompem a sincronizacao sem modificar a main.
+            git merge --no-ff --no-edit refs/remotes/upstream/main
+            git push --force-with-lease origin "HEAD:refs/heads/$branch"
+          fi
+
+          if [ -z "$pr" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" \
+              --head "$branch" --base main \
+              --title "Sincronizar NexoFlow com o repositorio original" \
+              --body "Atualizacao da main de felipetelesbarbosa/NexoFlow. Revise as alteracoes e verificacoes antes de integrar a main da organizacao. Este PR preserva as personalizacoes do fork e nao e mesclado automaticamente."
+          else
+            echo "PR de sincronizacao ja existente: #$pr"
+          fi
+
+  sincronizar-releases:
+    name: Copiar releases oficiais com SHA-256
+    if: github.repository == 'lidershopping-dev/NexoFlow'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout completo do fork
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Baixar, validar e publicar releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sync_releases_from_upstream.py

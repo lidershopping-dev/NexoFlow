@@ -62,10 +62,13 @@ jobs:
           fi
 
           if [ -z "$pr" ]; then
-            gh pr create --repo "$GITHUB_REPOSITORY" \
+            if ! gh pr create --repo "$GITHUB_REPOSITORY" \
               --head "$branch" --base main \
               --title "Sincronizar NexoFlow com o repositorio original" \
-              --body "Atualizacao da main de felipetelesbarbosa/NexoFlow. Revise as alteracoes e verificacoes antes de integrar a main da organizacao. Este PR preserva as personalizacoes do fork e nao e mesclado automaticamente."
+              --body "Atualizacao da main de felipetelesbarbosa/NexoFlow. Revise as alteracoes e verificacoes antes de integrar a main da organizacao. Este PR preserva as personalizacoes do fork e nao e mesclado automaticamente."; then
+              echo "::warning::A branch foi sincronizada, mas a criacao de PR esta bloqueada. Ative em Settings > Actions > General > Allow GitHub Actions to create and approve pull requests."
+              echo "Crie o PR manualmente em https://github.com/$GITHUB_REPOSITORY/pull/new/$branch"
+            fi
           else
             echo "PR de sincronizacao ja existente: #$pr"
           fi

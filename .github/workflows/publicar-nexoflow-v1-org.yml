@@ -1,0 +1,55 @@
+name: Publicar NexoFlow 1.0 no fork
+
+on:
+  push:
+    branches:
+      - automation/publicar-nexoflow-v1-org
+    paths:
+      - .github/workflows/publicar-nexoflow-v1-org.yml
+
+permissions:
+  contents: write
+
+jobs:
+  publicar:
+    name: Copiar release verificado do repositorio original
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Baixar pacotes e conferir SHA-256
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          base='https://github.com/felipetelesbarbosa/NexoFlow/releases/download/v1.0'
+          for file in NexoFlow-1.0.zip NexoFlow-Setup-1.0.zip SHA256SUMS-1.0.txt; do
+            curl --fail --location --retry 3 --retry-all-errors --output "$file" "$base/$file"
+          done
+          echo 'e77774eec9126d784db295c0feb99a169afb81604825089f6827b827390ad9db  NexoFlow-1.0.zip' | sha256sum --check --strict
+          echo 'a2320a77905d1852da73dbecc40f704979ae41371ea354bf465622e32fd04dc0  NexoFlow-Setup-1.0.zip' | sha256sum --check --strict
+          echo '3a1949f7f0e365d18e3c5ef19f2176c7bfd2fbfc13fdc127c88677e4e24ad4e5  SHA256SUMS-1.0.txt' | sha256sum --check --strict
+
+      - name: Recuperar notas originais
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/felipetelesbarbosa/NexoFlow/releases/tags/v1.0 --jq '.body' > "$RUNNER_TEMP/release-notes.md"
+          test -s "$RUNNER_TEMP/release-notes.md"
+
+      - name: Publicar release v1.0 na organizacao
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          target='550ec1ccb6f491fe12ef2e9f5622d0208a83c7f0'
+          if gh release view v1.0 --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload v1.0 NexoFlow-1.0.zip NexoFlow-Setup-1.0.zip SHA256SUMS-1.0.txt --clobber --repo "$GITHUB_REPOSITORY"
+            gh release edit v1.0 --title 'NexoFlow 1.0' --notes-file release-notes.md --latest --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create v1.0 NexoFlow-1.0.zip NexoFlow-Setup-1.0.zip SHA256SUMS-1.0.txt --target "$target" --title 'NexoFlow 1.0' --notes-file release-notes.md --latest --repo "$GITHUB_REPOSITORY"
+          fi
+          gh release view v1.0 --json url,tagName,assets --repo "$GITHUB_REPOSITORY"

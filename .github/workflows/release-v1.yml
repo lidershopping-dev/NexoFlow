@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   qualidade:
+    if: github.repository == 'felipetelesbarbosa/NexoFlow'
     name: Qualidade e dependências
     runs-on: ubuntu-latest
     steps:
@@ -40,6 +41,7 @@ jobs:
         run: pip-audit -r requirements.txt -r requirements-webhook.txt
 
   verificar-segredos:
+    if: github.repository == 'felipetelesbarbosa/NexoFlow'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -70,6 +72,7 @@ jobs:
             --mode history --repo "$GITHUB_WORKSPACE"
 
   validar-python:
+    if: github.repository == 'felipetelesbarbosa/NexoFlow'
     name: Testes Python ${{ matrix.python-version }}
     runs-on: windows-latest
     permissions:
@@ -114,6 +117,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Os testes de leitura com a codificação padrão do Windows falharam." }
 
   validar-e-publicar:
+    if: github.repository == 'felipetelesbarbosa/NexoFlow'
     needs: [qualidade, verificar-segredos, validar-python]
     runs-on: windows-latest
     permissions:
@@ -189,7 +193,7 @@ jobs:
           ./scripts/test_setup_windows.ps1 -SetupZip "dist/NexoFlow-Setup-1.0.zip"
 
       - name: Disponibilizar pacotes do NexoFlow 1.0
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        if: github.repository == 'felipetelesbarbosa/NexoFlow' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: NexoFlow-1.0-pacotes
@@ -207,7 +211,7 @@ jobs:
           Get-Content "dist/SHA256SUMS-1.0.txt"
 
   verificar-pacotes:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.repository == 'felipetelesbarbosa/NexoFlow' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: [verificar-segredos, validar-e-publicar]
     runs-on: ubuntu-latest
     permissions:
@@ -245,7 +249,7 @@ jobs:
             --mode packages --repo "$GITHUB_WORKSPACE" --assets-dir "$GITHUB_WORKSPACE/dist"
 
   publicar:
-    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    if: github.repository == 'felipetelesbarbosa/NexoFlow' && github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: [verificar-segredos, validar-e-publicar, verificar-pacotes]
     runs-on: windows-latest
     permissions:

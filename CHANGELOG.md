@@ -1,5 +1,7 @@
 # NexoFlow 1.0 — Changelog
 
+- Frete lançado como item de código 0 e descrição vazia é separado dos produtos quando corresponde ao frete oficial do cabeçalho, sem duplicar o faturamento ou bloquear pedidos válidos.
+
 - Google Sheets: novas linhas gravadas em posições explícitas, sem deslocamento de colunas ou expansão automática de tabelas, com retentativas idempotentes e bloqueio de dados fora do cabeçalho.
 
 - Weni, Analytics e Recompra: pedidos oficialmente sem itens são tratados como cancelados e ignorados nas vendas e produtos do dashboard, sem bloquear a carga. Falhas de consulta continuam sendo erros.

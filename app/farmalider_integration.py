@@ -318,6 +318,22 @@ def _api_product_identity(api_item: dict[str, Any]) -> tuple[str, str]:
     return _text(raw_code), description.strip()
 
 
+def _is_freight_item(api_item: dict[str, Any]) -> bool:
+    """O lançamento de frete usa código 0 e descrição ausente ou vazia."""
+    code = api_item.get("codProduto")
+    description = api_item.get("descricao")
+    return (
+        not isinstance(code, bool)
+        and isinstance(code, (int, str))
+        and str(code).strip() == "0"
+        and (
+            description is None
+            or isinstance(description, str)
+            and not description.strip()
+        )
+    )
+
+
 def _pedido_from_cliente_payload(
     payload: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
@@ -521,6 +537,8 @@ def apply_pedido_api_confirmation(
 
     api_total = Decimal("0")
     api_qty = Decimal("0")
+    freight_items_total = Decimal("0")
+    freight_item_count = 0
     canonical_items: list[dict[str, str]] = []
     key = f"FARMALIDER:{api_id}"
     date_time = emitted.isoformat(timespec="seconds")
@@ -549,6 +567,10 @@ def apply_pedido_api_confirmation(
                 if api_item.get("total") not in (None, "")
                 else quantity * unit
             )
+            if _is_freight_item(api_item):
+                freight_items_total += total
+                freight_item_count += 1
+                continue
             code, name = _api_product_identity(api_item)
 
             canonical_items.append(
@@ -582,6 +604,10 @@ def apply_pedido_api_confirmation(
             if capa.get("frete") not in (None, "")
             else None
         )
+        if freight_item_count and (freight is None or freight_items_total != freight):
+            raise ValueError(
+                "Lançamento de frete sem correspondência com o frete do cabeçalho."
+            )
         official_total = None
         for field in (
             "valorTotal",
@@ -596,6 +622,18 @@ def apply_pedido_api_confirmation(
                 break
     except ValueError as exc:
         return _failure(order, [], "ERRO_ITENS_PEDIDO_API", str(exc))
+
+    if not canonical_items:
+        # Frete não é produto. Sem produtos, aplicar a mesma regra de pedido
+        # vazio, após validar o vínculo, os valores e o frete do cabeçalho.
+        return apply_pedido_api_confirmation(
+            order,
+            [],
+            dict(pedido_api, itens=[]),
+            linked_cliente_id=linked_cliente_id,
+            confirmed_at=confirmed_at,
+            allow_locator_without_customer=allow_locator_without_customer,
+        )
 
     # Contrato Weni: pedido_valor é somente produtos. Para BI/faturamento,
     # o frete fica separado e também compõe o total cobrado do pedido.

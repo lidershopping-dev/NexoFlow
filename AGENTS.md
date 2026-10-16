@@ -18,3 +18,5 @@ Ao atualizar este repositório, mantenha a identificação pública **NexoFlow 1
 - Consultar primeiro CPFs válidos; depois inválidos preenchidos, incluindo zeros. Repor zeros à esquerda até 11 dígitos somente se os dígitos verificadores forem válidos. Não alterar dígitos existentes nem confundir presença na API com validade matemática.
 
 - CPF inválido exige primeiro nome correspondente (normalizando acentos, maiúsculas e símbolos) ou número local do telefone correspondente, ignorando +55 e DDD, do mesmo cliente da Weni. Bloqueie ausência, divergência e ambiguidade; cache compartilhado de CPF não compartilha identidade/pedidos.
+
+- Lançamento com `codProduto=0` e descrição vazia representa frete somente quando a soma desses lançamentos coincide com o frete oficial do cabeçalho. Validar vínculo e valores; não incluir em produtos, quantidades, Recompra ou valor dos produtos e não somar o frete duas vezes.

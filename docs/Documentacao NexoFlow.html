@@ -603,9 +603,16 @@ disponível.</p>
 <pre class="text"><code>logs\nexoflow_update_weni.log
 logs\weni_update_audit.jsonl
 logs\weni_update_state.json</code></pre>
-<p>O checkpoint só é gravado após todas as alterações terminarem com
-sucesso. Falhas deixam a janela pendente para reprocessamento. Valores
-iguais não são regravados.</p>
+<p>Falhas isoladas não cancelam a carga Weni. Os contatos concluídos
+permanecem aplicados; os demais ficam registrados para revalidação na
+próxima incremental, recuperando mensagens anteriores quando necessário.
+Valores iguais não são regravados.</p>
+<p>A deduplicação integra a revisão e a aplicação da Weni: identifica o
+contato correto pelo CPF oficial e telefone nativo único, verifica a
+propriedade dos pedidos e exclui somente duplicados comprovados. Pedidos
+reais e recusas são preservados, com limpeza das fontes do Sheets e do
+Looker. <a href="deduplicacao_weni.md">Regras e retomada da
+deduplicação</a>.</p>
 <h2 id="bats-operacionais">BATs operacionais</h2>
 <pre class="text"><code>comandos/testar_update_weni.bat
 comandos/atualizar_weni_dry_run.bat
@@ -855,4 +862,4 @@ dos itens do período e sinaliza ausência ou divergência em
 comerciais.</p>
 </body>
 </html>
-<!-- NexoFlow documentation: source-sha256=ea139eccf40f88da4bd5d23593a62147f3889407808ef0e9672bf992107809cc content-sha256=7b7563f5596773a8456d5b6c88bd90935a7f94b5b43f669167db4a30c1322065 -->
+<!-- NexoFlow documentation: source-sha256=34a378552cb45a0d1e8443658a62c1e66e8105ba3b1fa4be43438e82c4e7828a content-sha256=5b7b69c1c06cd5722da9b3c56965c834c8821d06cbeabff2f329cd066e430b32 -->

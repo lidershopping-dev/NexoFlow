@@ -65,17 +65,39 @@ def _rows(path, sheet, required):
             worksheet.reset_dimensions()
             iterator = worksheet.iter_rows()
             header = next(iterator, ())
+            if any(cell.data_type == "f" for cell in header):
+                raise DeliverySpreadsheetError(
+                    "O export contém fórmulas no cabeçalho; preserve os cabeçalhos originais."
+                )
             names = [str(cell.value or "").strip() for cell in header]
             if not required <= set(names):
                 raise DeliverySpreadsheetError(
                     "Colunas obrigatórias ausentes; preserve os cabeçalhos originais dos exports."
                 )
             for number, cells in enumerate(iterator, 2):
-                if any(cell.data_type == "f" for cell in cells):
-                    raise DeliverySpreadsheetError(
-                        "O export contém fórmulas; use o arquivo original de dados, sem fórmulas."
-                    )
-                yield number, names, [cell.value for cell in cells]
+                values = []
+                for index, cell in enumerate(cells):
+                    value = cell.value
+                    if cell.data_type == "f":
+                        # The original Chats export serializes boolean constants
+                        # as formulas. Decode only these exact constants in the
+                        # activity column, without evaluating Excel expressions
+                        # or trusting potentially stale cached formula values.
+                        if (
+                            sheet == "rooms"
+                            and index < len(names)
+                            and names[index] == "is_active"
+                            and isinstance(value, str)
+                            and value.upper() in ("=FALSE()", "=TRUE()")
+                        ):
+                            value = value.upper() == "=TRUE()"
+                        else:
+                            raise DeliverySpreadsheetError(
+                                "O export contém uma fórmula não permitida "
+                                f"na célula {cell.coordinate}; use o arquivo original de dados."
+                            )
+                    values.append(value)
+                yield number, names, values
     finally:
         workbook.close()
 

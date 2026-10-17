@@ -128,7 +128,8 @@ echo REVISÃO HUMANA OBRIGATÓRIA
 echo ==========================================================
 if defined PART echo Parte revisada: %PART%/4
 echo O relatório será aberto no Bloco de Notas.
-echo Confira especialmente LGPD, idade/maioridade, grupos, CPF e pedidos.
+echo Confira especialmente LGPD, idade/maioridade, grupos, CPF, pedidos e exclusões de duplicados.
+echo Encerre outras cargas de Analytics, Planilhas e Recompra antes de aplicar.
 echo O plano fica congelado enquanto você revisa.
 echo O CMD ficará aguardando a confirmação enquanto você revisa.
 echo Depois de concluir, feche o Bloco de Notas e volte ao CMD.

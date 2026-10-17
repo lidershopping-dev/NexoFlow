@@ -64,6 +64,11 @@ py-modules = [
   "weni_chats_client",
   "weni_client",
   "weni_update",
+  "weni_dedup",
+  "contact_dedup_guard",
+  "dedup_io",
+  "dedup_sheets",
+  "dedup_bi",
 ]
 
 [tool.setuptools.dynamic]

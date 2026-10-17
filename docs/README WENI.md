@@ -17,7 +17,7 @@ A barra vai de 0% a 100% **em cada etapa com total conhecido**. Um contato
 avança a contagem depois de seu processamento e do registro de auditoria,
 inclusive se for ignorado por conflito ou já estiver correto. Aplicados são
 mostrados separadamente: percentual processado não significa percentual gravado.
-Falhas interrompem a etapa sem indicar conclusão.
+Falhas isoladas deixam apenas o contato ou lote pendente; os demais continuam.
 
 A velocidade de contatos/registros usa o trabalho concluído nos últimos dez
 segundos; o tempo restante usa a média desde o início da etapa. Esperas e
@@ -198,7 +198,7 @@ A carga completa foi adaptada para ambientes em que a Weni continua recebendo me
 
 Antes de cada contato ser gravado, o NexoFlow consulta novamente aquele contato na Weni. Para cada campo planejado, o valor atual precisa continuar igual ao valor anterior revisado ou já ter chegado ao próprio valor proposto. Também são protegidas as URNs nativas, `opt_in_lgpd` quando governa grupos e os campos `pedido_*` usados como snapshot operacional. Se houver divergência, o contato recebe status de auditoria `conflict_skipped` e a carga continua para os demais. Se outra automação já aplicou exatamente o mesmo resultado, o status é `already_satisfied` e não há regravação.
 
-Ao final, o checkpoint avança para o **corte do dry-run**, não para o horário final da aplicação. Assim, tudo que chegou ou mudou depois do snapshot é elegível para a próxima execução incremental, inclusive os contatos que foram isolados por conflito. Uma falha real de POST continua interrompendo a execução e impede o avanço do checkpoint.
+Ao final, o checkpoint avança para o **corte do dry-run**, não para o horário final da aplicação. Assim, tudo que chegou ou mudou depois do snapshot é elegível para a próxima execução incremental, inclusive os contatos que foram isolados por conflito. Uma falha de POST é registrada para nova conferência na próxima incremental; os demais contatos continuam.
 
 ## Google Ads e canal de destino
 
@@ -329,7 +329,7 @@ O estado fica em:
 logs\weni_update_state.json
 ```
 
-A rotina usa uma sobreposição de segurança no período consultado e é idempotente: valores idênticos não são regravados. O checkpoint só avança depois que todas as gravações terminam sem erro.
+A rotina usa uma sobreposição de segurança no período consultado e é idempotente: valores idênticos não são regravados. O checkpoint avança após processar os contatos disponíveis; os que falharam ficam na fila de revalidação da próxima incremental, com recuperação do histórico de mensagens quando necessário.
 
 ## Auditoria e logs
 
@@ -359,7 +359,7 @@ Pagamento sem de-para é informativo: cada código aparece em `INFO` uma vez por
 - pedido só atualiza campos de compra com confirmação FarmaLíder;
 - nenhuma escrita acontece antes de `audit_plans`;
 - carga completa aplica exatamente o snapshot congelado revisado pelo operador, sem recalcular todo o histórico;
-- falha de escrita bloqueia o checkpoint;
+- falha isolada de escrita mantém o contato pendente, sem cancelar a carga;
 - nenhuma credencial é incorporada ao executável.
 
 
@@ -420,3 +420,7 @@ python app/run_update_weni.py --apply --full --require-review logs/weni_update_r
 ```
 
 Para uma parte, use `--quarter N` e o arquivo `logs/weni_update_review_full_25_parte_N.json` correspondente. Não gere um novo dry-run para retomar uma aplicação parcial sem antes conferir o snapshot e os logs.
+
+## Deduplicação integrada
+
+O relatório do dry-run também apresenta os contatos duplicados propostos para exclusão. A aplicação revalida a propriedade nas APIs, preserva os pedidos reais e as recusas e limpa as fontes do Sheets e do Looker. Falhas isoladas não cancelam a carga: os comprovantes permanecem para retomada na próxima incremental. Consulte [Deduplicação na rotina Weni](deduplicacao_weni.md).

@@ -229,7 +229,9 @@ logs\weni_update_audit.jsonl
 logs\weni_update_state.json
 ```
 
-O checkpoint só é gravado após todas as alterações terminarem com sucesso. Falhas deixam a janela pendente para reprocessamento. Valores iguais não são regravados.
+Falhas isoladas não cancelam a carga Weni. Os contatos concluídos permanecem aplicados; os demais ficam registrados para revalidação na próxima incremental, recuperando mensagens anteriores quando necessário. Valores iguais não são regravados.
+
+A deduplicação integra a revisão e a aplicação da Weni: identifica o contato correto pelo CPF oficial e telefone nativo único, verifica a propriedade dos pedidos e exclui somente duplicados comprovados. Pedidos reais e recusas são preservados, com limpeza das fontes do Sheets e do Looker. [Regras e retomada da deduplicação](deduplicacao_weni.md).
 
 ## BATs operacionais
 

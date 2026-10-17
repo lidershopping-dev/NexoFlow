@@ -34,3 +34,6 @@ logs/weni*state*.json
 logs/weni*review*.json
 logs/weni*review*.txt
 logs/weni*audit*.jsonl
+
+# Comprovantes, backups e lock privados da deduplicação
+logs/duplicados/

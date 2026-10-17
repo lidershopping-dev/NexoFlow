@@ -1693,7 +1693,7 @@ class WeniUpdateTests(unittest.TestCase):
     @patch("weni_update._open_farmalider", return_value=None)
     @patch("weni_update.resolve_window")
     @patch("weni_update.WeniClient")
-    def test_apply_failure_never_advances_checkpoint(
+    def test_apply_failure_keeps_contact_pending_and_continues(
         self,
         client_cls,
         resolve_window_mock,
@@ -1721,14 +1721,196 @@ class WeniUpdateTests(unittest.TestCase):
                 "fields": {},
             }
         ]
-        client.update_contact_fields.side_effect = RuntimeError("falha simulada")
+        client.list_contacts.return_value.append(
+            {
+                "uuid": "u2",
+                "urns": ["whatsapp:5591988888888"],
+                "groups": [],
+                "fields": {},
+            }
+        )
+        client.update_contact_fields.side_effect = [RuntimeError("falha simulada"), {}]
 
-        with self.assertRaisesRegex(RuntimeError, "checkpoint não foi avançado"):
-            run_update(apply=True, full=False)
+        result = run_update(apply=True, full=False)
+        self.assertEqual(result.contacts_failed, 1)
+        self.assertEqual(result.contacts_updated, 1)
+        self.assertEqual(client.update_contact_fields.call_count, 2)
+        saved = save_state_mock.call_args.args[0]
+        self.assertEqual(saved["pending_conflict_uuids"], ["u1"])
+        self.assertEqual(saved["last_success_utc"], "2026-10-03T12:00:00Z")
+        self.assertEqual(append_audit_mock.call_count, 2)
 
-        client.update_contact_fields.assert_called_once()
-        save_state_mock.assert_not_called()
-        append_audit_mock.assert_called_once()
+    @patch("weni_update._save_state")
+    @patch("weni_update._append_audit")
+    @patch("weni_update._open_farmalider", return_value=None)
+    @patch("weni_update.WeniClient")
+    def test_incremental_retry_recovers_messages_older_than_checkpoint(
+        self, client_cls, _farm, _audit, save_state
+    ):
+        from datetime import datetime
+
+        started = datetime(2026, 10, 3, 12, tzinfo=UTC)
+        client = client_cls.return_value
+        client.list_fields.return_value = self._required_weni_fields()
+        client.list_groups.return_value = [{"uuid": "g1", "name": "Opt-Out LGPD"}]
+        client.list_contacts.return_value = [
+            {
+                "uuid": "u1",
+                "urns": ["whatsapp:5591999999999"],
+                "groups": [],
+                "fields": {},
+            }
+        ]
+        old = {
+            "id": "old-in",
+            "direction": "in",
+            "text": "Tenho 37 anos",
+            "created_on": "2026-10-01T12:00:00Z",
+        }
+        client.list_messages.side_effect = lambda **kw: (
+            [old] if kw.get("contact") == "u1" else []
+        )
+        with (
+            patch(
+                "weni_update._load_state",
+                return_value={"pending_conflict_uuids": ["u1"]},
+            ),
+            patch(
+                "weni_update.resolve_window",
+                return_value=UpdateWindow(
+                    started_at=started, after=started, full=False
+                ),
+            ),
+        ):
+            result = run_update(apply=True)
+        self.assertEqual(result.contacts_updated, 1)
+        self.assertEqual(client.update_contact_fields.call_args.args[1]["idade"], 37)
+        client.list_messages.assert_any_call(contact="u1", before=started)
+        self.assertEqual(save_state.call_args.args[0]["pending_conflict_uuids"], [])
+
+    @patch("weni_update._save_state")
+    @patch("weni_update._append_audit")
+    @patch("weni_update.WeniClient")
+    def test_frozen_apply_failure_preserves_pending_and_applies_other_contact(
+        self, client_cls, _audit, save_state
+    ):
+        client = client_cls.return_value
+        client.list_fields.return_value = self._required_weni_fields()
+        client.list_groups.return_value = [{"uuid": "g1", "name": "Opt-Out LGPD"}]
+        client.get_contact.side_effect = lambda **kw: {
+            "uuid": kw["uuid"],
+            "fields": {},
+            "urns": [],
+            "groups": [],
+        }
+        plans = [
+            ContactUpdatePlan(contact_uuid=uid, fields={"idade": 37})
+            for uid in ("u1", "u2")
+        ]
+        client.update_contact_fields.side_effect = [RuntimeError("falha simulada"), {}]
+        payload = {"summary": {}, "captured_at_utc": "2026-10-03T12:00:00Z"}
+        with (
+            patch(
+                "weni_update.load_review_snapshot",
+                return_value=(plans, payload, "hash"),
+            ),
+            patch("weni_update.audit_plans"),
+            patch(
+                "weni_update._prepare_frozen_plan_for_apply",
+                side_effect=lambda plan, *args, **kw: (plan, ""),
+            ),
+        ):
+            result = run_update(
+                apply=True, full=True, require_review=Path("sintetico.json")
+            )
+        self.assertEqual(result.contacts_failed, 1)
+        self.assertEqual(result.contacts_updated, 1)
+        self.assertEqual(client.update_contact_fields.call_count, 2)
+        self.assertEqual(save_state.call_args.args[0]["pending_conflict_uuids"], ["u1"])
+
+    @patch("weni_update._save_state")
+    @patch("weni_update._append_audit")
+    @patch("weni_update._open_farmalider", return_value=None)
+    @patch("weni_update.WeniClient")
+    def test_failed_pending_contact_lookup_does_not_stop_healthy_contacts(
+        self, client_cls, _farm, _audit, save_state
+    ):
+        from datetime import datetime
+
+        started = datetime(2026, 10, 3, 12, tzinfo=UTC)
+        client = client_cls.return_value
+        client.list_fields.return_value = self._required_weni_fields()
+        client.list_groups.return_value = [{"uuid": "g1", "name": "Opt-Out LGPD"}]
+        client.list_contacts.return_value = [
+            {
+                "uuid": "u2",
+                "urns": ["whatsapp:5591999999999"],
+                "groups": [],
+                "fields": {},
+            }
+        ]
+        client.list_messages.return_value = []
+        client.get_contact.side_effect = RuntimeError("falha simulada")
+        with (
+            patch(
+                "weni_update._load_state",
+                return_value={"pending_conflict_uuids": ["u1"]},
+            ),
+            patch(
+                "weni_update.resolve_window",
+                return_value=UpdateWindow(
+                    started_at=started, after=started, full=False
+                ),
+            ),
+        ):
+            result = run_update(apply=True)
+        self.assertEqual(result.contacts_failed, 1)
+        self.assertEqual(result.contacts_updated, 1)
+        self.assertEqual(save_state.call_args.args[0]["pending_conflict_uuids"], ["u1"])
+        client.get_contact.assert_called_once_with(uuid="u1")
+
+    @patch("weni_update._save_state")
+    @patch("weni_update._append_audit")
+    @patch("weni_update.WeniClient")
+    def test_frozen_snapshot_skips_verified_deduplicated_contact_without_conflict(
+        self, client_cls, _audit, save_state
+    ):
+        client = client_cls.return_value
+        client.list_fields.return_value = self._required_weni_fields()
+        client.list_groups.return_value = [{"uuid": "g1", "name": "Opt-Out LGPD"}]
+        client.get_contact.return_value = {
+            "uuid": "u2",
+            "fields": {},
+            "urns": [],
+            "groups": [],
+        }
+        plans = [
+            ContactUpdatePlan(contact_uuid=uid, fields={"idade": 37})
+            for uid in ("u1", "u2")
+        ]
+        payload = {"summary": {}, "captured_at_utc": "2026-10-03T12:00:00Z"}
+        with (
+            patch(
+                "weni_update.load_review_snapshot",
+                return_value=(plans, payload, "hash"),
+            ),
+            patch("weni_update.audit_plans"),
+            patch(
+                "weni_update._prepare_frozen_plan_for_apply",
+                side_effect=lambda plan, *args, **kw: (plan, ""),
+            ),
+        ):
+            result = run_update(
+                apply=True,
+                full=True,
+                require_review=Path("sintetico.json"),
+                deduplicated_uuids={"u1"},
+            )
+        self.assertEqual(result.contacts_failed, 0)
+        self.assertEqual(result.contacts_conflicted, 0)
+        self.assertEqual(result.contacts_updated, 1)
+        client.get_contact.assert_called_once_with(uuid="u2")
+        client.update_contact_fields.assert_called_once_with("u2", {"idade": 37})
 
     @patch("weni_update._open_farmalider", return_value=None)
     @patch("weni_update.resolve_window")

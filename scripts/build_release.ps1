@@ -313,6 +313,10 @@ Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/payload ma
 Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/NexoFlow Recompra.exe"
 Assert-ZipEntry -ZipPath $ProjectZip -EntryName "NexoFlow/NexoFlow Recompra.exe"
 Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/app/weni_update.py"
+foreach ($module in @("weni_dedup", "contact_dedup_guard", "dedup_io", "dedup_sheets", "dedup_bi")) {
+    Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/app/$module.py"
+    Assert-ZipEntry -ZipPath $ProjectZip -EntryName "NexoFlow/app/$module.py"
+}
 Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/app/task_progress.py"
 Assert-ZipEntry -ZipPath $ProjectZip -EntryName "NexoFlow/app/task_progress.py"
 Assert-ZipEntry -ZipPath $SetupZip -EntryName "NexoFlow Setup/payload/app/observed_orders.py"
@@ -345,6 +349,9 @@ Distribuição oficial do **NexoFlow 1.0**.
 O arquivo `NexoFlow-Setup-$Version.zip` contém o instalador do NexoFlow 1.0 e foi validado automaticamente em Windows para primeira instalação e atualização de uma instalação existente.
 
 Melhorias desta distribuição do NexoFlow 1.0:
+- Planilha aceita as constantes booleanas originais do export de conversas no campo is_active, mantendo o filtro de atendimentos encerrados e o bloqueio de outras fórmulas;
+- deduplicação integrada às cargas Weni, com revisão de exclusões, CPF oficial, telefone nativo único e propriedade dos pedidos; contatos incorretos saem da Weni e das fontes do Sheets/Looker, preservando vendas e recusas;
+- falhas isoladas da Weni geram aviso e pendência, sem cancelar a carga; a próxima incremental revalida os contatos e recupera suas mensagens anteriores quando necessário;
 - tabelas comerciais para Looker Studio com histórico de vendas, KPIs e Curva ABC com cobertura de itens; tipos monetários corrigidos e migração financeira atômica;
 - check-up corrigido para a codificação padrão do Windows; escritas no Sheets reconciliam inclusões após timeout; validação de código, tipos e dependências antes da publicação;
 - Weni com ícone azul e ciano, contato e balão de conversa, seguindo a estética dos outros componentes do NexoFlow;
@@ -360,7 +367,7 @@ Melhorias desta distribuição do NexoFlow 1.0:
 - recompra com grupo de 0 a 25 dias, revisão, controle persistente e proteção de referências; envio D+25 permanece na campanha Weni; confira docs/README RECOMPRA.md antes de habilitar;
 - cidade, estado, CEP, bairro e idade dos clientes da Weni na base e BI_Pedidos; CEP preservado como texto e datas de pedido mantidas;
 - interface e documentação em português brasileiro, com acentos e cedilha; CMD em UTF-8, PowerShell com BOM e executáveis recompilados com metadados pt-BR;
-- carga completa Weni 100% ou em partes mantém o CMD aguardando a revisão humana; cancelar ou falhar não aplica o snapshot e preserva o diagnóstico;
+- carga completa Weni 100% ou em partes mantém o CMD aguardando a revisão humana; cancelamentos não aplicam o snapshot e falhas isoladas ficam pendentes sem interromper os demais contatos;
 - componente de confirmação incluído e validado no projeto completo e no Setup;
 - de-para de pagamento atualizado: 0 Cancelado; 1 Dinheiro; 2 Débito; 3 Crédito; 4 Ticket; 5 Pix por Link de Pagamento; 6 Pix no POS;
 - pagamento 0 cancela o pedido: forma de pagamento Cancelado e status 3 na Weni e no BI, preservando os códigos brutos da API na tabela de pedidos;

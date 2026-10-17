@@ -30,7 +30,7 @@ class CompleteQueriesTests(unittest.TestCase):
         self.assertEqual(stats.orders_api_failed, 3)
         self.assertEqual(stats.orders_validated, 0)
 
-    def test_weni_cli_blocks_partial_queries_and_apply_conflicts_only_in_strict_mode(
+    def test_weni_cli_finishes_with_pending_contacts_even_with_legacy_strict_flag(
         self,
     ):
         from run_update_weni import main
@@ -58,8 +58,22 @@ class CompleteQueriesTests(unittest.TestCase):
                         )
                     )
                     stack.enter_context(patch("logging_config.configure_logging"))
+                    stack.enter_context(
+                        patch(
+                            "weni_dedup.run_with_dedup",
+                            side_effect=lambda **kw: (
+                                kw["update"](set(), None),
+                                {
+                                    "proposed": 0,
+                                    "pending": 0,
+                                    "deleted": 0,
+                                    "skipped": 0,
+                                },
+                            ),
+                        )
+                    )
                     stack.enter_context(patch("builtins.print"))
-                    self.assertEqual(main(), 3 if strict else 0)
+                    self.assertEqual(main(), 0)
 
     def test_planilhas_keeps_review_but_blocks_api_errors_before_application(self):
         from run_delivery_tickets import main

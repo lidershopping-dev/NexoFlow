@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-complete",
         action="store_true",
-        help="interrompe o fluxo se houver consultas de pedido incompletas",
+        help="mantido por compatibilidade; falhas isoladas ficam pendentes para a próxima incremental",
     )
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
@@ -154,22 +154,37 @@ def main() -> int:
 
         review_out = Path(args.review_out) if args.review_out else None
         require_review = Path(args.require_review) if args.require_review else None
+        from weni_dedup import run_with_dedup
+
         default_review = (
             Path(f"logs/weni_update_review_full_25_parte_{args.quarter}.json")
             if args.quarter is not None
-            else Path("logs/weni_update_review_full.json")
+            else Path(
+                "logs/weni_update_review_full.json"
+                if args.full
+                else "logs/weni_update_review.json"
+            )
         )
-        if args.dry_run and args.full and review_out is None:
+        if args.dry_run and review_out is None:
             review_out = default_review
         if args.apply and args.full and require_review is None:
             require_review = default_review
 
-        stats = run_update(
+        dedup_review = require_review or review_out or default_review
+        stats, dedup = run_with_dedup(
             apply=args.apply,
             full=args.full,
-            review_out=review_out,
-            require_review=require_review,
             quarter=args.quarter,
+            review_path=dedup_review,
+            update=lambda removed, contacts: run_update(
+                apply=args.apply,
+                full=args.full,
+                review_out=review_out,
+                require_review=require_review,
+                quarter=args.quarter,
+                deduplicated_uuids=removed,
+                dedup_contacts=contacts,
+            ),
         )
         print("\n=== Resumo NexoFlow Weni ===")
         if args.quarter is not None:
@@ -200,6 +215,9 @@ def main() -> int:
                 "Pagamento não identificado por código: "
                 f"{dict(sorted(stats.payment_unmapped_codes.items()))}"
             )
+        print(
+            f"Duplicados: propostas={dedup['proposed']}; excluídos={dedup['deleted']}; pendências={dedup['pending']}; conflitos={dedup['skipped']}; lotes pendentes={dedup.get('failed_batches', 0)}."
+        )
         if args.dry_run:
             print("Modo: DRY-RUN. Nenhuma alteração foi gravada.")
             if review_out is not None:
@@ -222,13 +240,16 @@ def main() -> int:
                 )
             else:
                 print("Modo: APPLY. Alterações auditadas e gravadas.")
-        if args.require_complete and (
+        if (
             stats.orders_api_failed
             or stats.contacts_conflicted
             or stats.contacts_failed
+            or dedup["skipped"]
+            or dedup.get("failed_batches", 0)
         ):
-            print("[AVISO] Carga Weni parcial. O fluxo completo não pode continuar.")
-            return 3
+            print(
+                "[AVISO] Carga Weni concluída com pendências. Os contatos que falharam serão revalidados na próxima incremental."
+            )
         return 0
     except Exception as exc:
         logging.exception("NexoFlow Weni falhou: %s", exc)

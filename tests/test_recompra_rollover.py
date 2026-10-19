@@ -41,6 +41,20 @@ class RecompraReviewDateTests(unittest.TestCase):
         self.assertEqual(BEFORE.astimezone(UTC).date().isoformat(), "2026-10-10")
         recompra.ensure_review_current(review, BEFORE.astimezone(UTC))
 
+    def test_previous_product_policy_review_is_rejected_even_with_valid_digest(self):
+        review = self.review()
+        review["policy"] = review["policy"].replace(
+            "human_products_v3_", "human_products_v2_"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "review.json"
+            path.write_text(
+                json.dumps({"review": review, "sha256": recompra.digest(review)}),
+                encoding="utf-8",
+            )
+            with self.assertRaises(RuntimeError):
+                recompra.read_review(path)
+
     def test_expired_review_has_specific_error_and_refresh_permission(self):
         self.assertEqual(recompra.REVIEW_EXPIRED_EXIT_CODE, 4)
         for allow_refresh in (True, False):
@@ -149,6 +163,80 @@ class RecompraApplyRolloverTests(unittest.TestCase):
         load.assert_not_called()
         self.weni.get_contact.assert_not_called()
         self.assert_no_mutations()
+
+    def test_transient_confirmation_file_lock_does_not_repeat_group_post(self):
+        review = self.prepare()
+        original = recompra.os.replace
+        failures = []
+
+        def replace(source, destination):
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+            admitted = (
+                payload.get("contacts", {})
+                .get("u1", {})
+                .get("orders", {})
+                .get("100", {})
+                .get("admitted")
+            )
+            if admitted and len(failures) < 2:
+                failures.append(True)
+                raise PermissionError(13, "bloqueio sintético")
+            original(source, destination)
+
+        with (
+            patch("recompra.os.replace", side_effect=replace),
+            patch("recompra.sleep"),
+        ):
+            result = self.apply(review)
+        self.assertEqual(result["aplicados"], 1)
+        self.assertEqual(len(failures), 2)
+        self.weni.contact_group_action.assert_called_once_with(
+            "u1", action="add", group=STRUCTURE["group_uuid"]
+        )
+        entry = recompra.load_state(self.state_path)["contacts"]["u1"]["orders"]["100"]
+        self.assertTrue(entry["admitted"])
+        self.assertFalse(entry["pending"])
+
+    def test_persistent_intent_file_lock_blocks_remote_mutations(self):
+        review = self.prepare()
+        with (
+            patch("recompra.os.replace", side_effect=PermissionError(13, "bloqueio")),
+            patch("recompra.sleep"),
+        ):
+            with self.assertRaises(PermissionError):
+                self.apply(review)
+        self.assert_no_mutations()
+
+    def test_persistent_confirmation_lock_preserves_pending_without_repeating_post(
+        self,
+    ):
+        review = self.prepare()
+        original = recompra.os.replace
+
+        def replace(source, destination):
+            payload = json.loads(Path(source).read_text(encoding="utf-8"))
+            entry = (
+                payload.get("contacts", {})
+                .get("u1", {})
+                .get("orders", {})
+                .get("100", {})
+            )
+            if entry.get("admitted"):
+                raise PermissionError(13, "bloqueio sintético")
+            original(source, destination)
+
+        with (
+            patch("recompra.os.replace", side_effect=replace),
+            patch("recompra.sleep"),
+        ):
+            with self.assertRaises(PermissionError):
+                self.apply(review)
+        self.weni.contact_group_action.assert_called_once_with(
+            "u1", action="add", group=STRUCTURE["group_uuid"]
+        )
+        entry = recompra.load_state(self.state_path)["contacts"]["u1"]["orders"]["100"]
+        self.assertTrue(entry["pending"])
+        self.assertFalse(entry.get("admitted", False))
 
     def test_structure_inspection_crosses_midnight_before_contact_queries(self):
         review = self.prepare()
@@ -468,6 +556,41 @@ class RecompraRunnerRolloverTests(unittest.TestCase):
         self.weni.close.assert_called_once()
         self.farm.close.assert_called_once()
 
+    def test_local_permission_error_is_not_reported_as_api_failure(self):
+        self.patches()
+        with (
+            patch(
+                "recompra.apply_review",
+                side_effect=PermissionError(13, "conteúdo privado"),
+            ) as apply,
+            patch("builtins.print") as printer,
+        ):
+            self.assertEqual(
+                run_recompra(["--apply", "--require-review", str(self.review_path)]), 1
+            )
+        apply.assert_called_once()
+        output = " ".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("arquivo local", output)
+        self.assertIn("errno=13", output)
+        self.assertNotIn("Falha de API", output)
+        self.assertNotIn("conteúdo privado", output)
+
+    def test_requests_connection_error_is_not_reported_as_local_file_failure(self):
+        self.patches()
+        with (
+            patch(
+                "recompra.apply_review", side_effect=requests.ConnectionError("privado")
+            ),
+            patch("builtins.print") as printer,
+        ):
+            self.assertEqual(
+                run_recompra(["--apply", "--require-review", str(self.review_path)]), 1
+            )
+        output = " ".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("Falha de API", output)
+        self.assertNotIn("arquivo local", output)
+        self.assertNotIn("privado", output)
+
     def test_dry_run_report_write_crossing_midnight_returns_expired_snapshot(self):
         stack = self.patches()
         self.weni.iter_contacts.return_value = iter([])
@@ -500,7 +623,7 @@ class RecompraRunnerRolloverTests(unittest.TestCase):
         )
         captured_days = []
 
-        def build(contacts, farm, structure, state, *, now, workers):
+        def build(contacts, farm, structure, state, *, now, workers, pagination_stats):
             captured_days.append(now.date().isoformat())
             plans = [
                 recompra.propose(current, order, items, structure, now=now)

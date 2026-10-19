@@ -34,7 +34,7 @@ Os dois BATs de carga completa agora oferecem cinco opções: **100%**, **Parte 
 
 Na primeira Parte 1, o NexoFlow congela a lista de UUIDs dos contatos em `logs\full_load_25_manifest.json`, ordena essa base de forma determinística e divide em quatro intervalos sem sobreposição. As Partes 2, 3 e 4 reutilizam exatamente o mesmo manifesto. Contatos criados depois do corte não deslocam as faixas e ficam para a próxima incremental.
 
-A execução deve respeitar a ordem 1 → 2 → 3 → 4 separadamente para Weni e Analytics. Uma parte só é marcada como concluída após terminar com sucesso; em erro parcial, execute novamente a mesma parte. Os upserts e as verificações de estado tornam a repetição segura.
+A execução deve respeitar a ordem 1 → 2 → 3 → 4 separadamente para Weni e Analytics. No Analytics, uma parte só é marcada como concluída após terminar com sucesso; em erro parcial, execute novamente a mesma parte. Na Weni, falhas isoladas ficam registradas para a próxima incremental, sem cancelar a atualização dos demais contatos. Os upserts e as verificações de estado tornam a repetição segura.
 
 No Analytics, as Partes 1 a 3 atualizam a parcela selecionada e recalculam o BI sobre o que já existe no Google Sheets. Portanto, durante a campanha, o dashboard pode misturar dados já renovados com registros ainda aguardando as próximas partes. **Depois da Parte 4, a carga fragmentada equivale à carga completa de 100% da base congelada.** O cursor incremental só avança ao concluir a Parte 4 e usa o corte da campanha, para capturar depois tudo que mudou enquanto as quatro partes eram executadas.
 

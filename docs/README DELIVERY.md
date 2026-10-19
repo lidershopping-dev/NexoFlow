@@ -24,11 +24,15 @@ nexo weni planilhas
 nexo analytics planilhas
 ```
 
-O primeiro comando consulta a FarmaLíder, aplica os campos de pedido na Weni e remove uma referência antiga de Recompra quando necessário e revisado. O segundo consulta novamente a FarmaLíder e publica os contatos/pedidos/itens e indicadores no Google Sheets, sem gravar na Weni. Recomenda-se executar Weni primeiro e Analytics depois. Cada execução prepara um snapshot próprio e abre o relatório no Bloco de Notas; digite `PLANILHAS REVISADAS` no CMD somente depois de conferir os resultados. Cancelar, fechar a janela ou falhar na consulta/auditoria impede a aplicação. Fechar o Bloco de Notas não confirma a carga.
+O primeiro comando consulta a FarmaLíder, aplica os campos de pedido na Weni e remove uma referência antiga de Recompra quando necessário e revisado. O segundo consulta novamente a FarmaLíder e publica os contatos/pedidos/itens e indicadores no Google Sheets, sem gravar na Weni. Recomenda-se executar Weni primeiro e Analytics depois. Uma nova carga prepara um snapshot próprio e abre o relatório no Bloco de Notas; digite `PLANILHAS REVISADAS` na janela de confirmação somente depois de conferir os resultados. Cancelar, fechar a janela ou falhar na consulta/auditoria impede a aplicação. Fechar o Bloco de Notas não confirma a carga.
+
+Se já existe uma revisão para o destino escolhido, o menu oferece **Retomar a revisão existente**, **Gerar nova revisão** ou **Cancelar**. Retomar reutiliza o mesmo JSON, abre novamente o relatório e exige confirmação humana. A aplicação relê os contatos e executa somente as operações ainda pendentes; alterações posteriores na Weni continuam protegidas. Gerar nova revisão preserva os arquivos anteriores, sem mudar seu conteúdo, em `logs/delivery_historico`. Se a consulta falhar, a revisão anterior permanece disponível no caminho original.
+
+Um conflito isolado produz **aviso de carga parcial**, com código de saída 3, preservando os contatos aceitos e impedindo o avanço automático para as próximas etapas do fluxo completo. Consulte o JSON privado `logs/privado/delivery_weni_review_conflitos.json` ou o equivalente de Analytics: ele identifica UUID, motivo, campos divergentes e impressões digitais dos valores, sem copiar CPF, nome, telefone ou conteúdo das conversas. O console mostra somente uma referência protegida por contato e os totais. Retome o mesmo snapshot para conferir o estado atual; se a divergência persistir, gere e revise um novo snapshot antes de autorizar os novos dados.
 
 Essa modalidade não precisa do token `project_auth` do Chats. Continua exigindo token de contatos da Weni, token FarmaLíder e, para Analytics, credencial/ID da planilha Google. O importador cruza o UUID interno do Chats com o UUID de contatos/Flows por identificador ou URN nativa única; não usa nome ou CPF sozinho para unir contatos. Mudanças no nome exibido, inclusive emojis, não impedem esse vínculo. URNs ambíguas, datas inválidas, conversas abertas, ausência de atendente e setores diferentes são excluídos com motivo.
 
-Antes da consulta de pedidos, o vínculo UUID/URN é revalidado na base atual da Weni. CPF, nome, e-mail e telefone usados na FarmaLíder vêm desse contato atual, evitando atualizar a partir de dados pessoais desatualizados no export. Consultas priorizam CPFs válidos, depois inválidos preenchidos, incluindo zero. CPF válido dispensa comparação de nome, e-mail e telefone; CPF inválido exige primeiro nome correspondente ou número local do telefone correspondente do mesmo cliente da API, sem ambiguidade. Sem CPF, somente os localizadores oficiais já existentes no contato podem ser revalidados; não há endpoint documentado de busca por nome/e-mail/telefone.
+Antes da consulta de pedidos, o vínculo UUID/URN é revalidado na base atual da Weni. CPF, nome, e-mail e telefone usados na FarmaLíder vêm desse contato atual, evitando atualizar a partir de dados pessoais desatualizados no export. Consultas priorizam CPFs válidos, depois inválidos preenchidos não zerados. Valores ausentes, inteiramente zerados ou malformados ficam como pendência cadastral, sem consulta por CPF. CPF válido dispensa comparação de nome, e-mail e telefone; CPF inválido preenchido exige primeiro nome correspondente ou número local do telefone correspondente do mesmo cliente da API, sem ambiguidade. Quando o CPF está ausente, somente os localizadores oficiais já existentes no contato podem ser revalidados. CPF zerado ou malformado bloqueia o reaproveitamento desses localizadores até a correção cadastral; não há endpoint documentado de busca por nome/e-mail/telefone.
 
 Logs e revisão apresentam totais por grupo de CPF, pedidos validados e impedimentos, sem exibir dados pessoais no console. Os relatórios privados são `logs/delivery_weni_review.txt` e `logs/delivery_analytics_review.txt`. Falha de API não significa cliente sem pedido. A carga mantém a revisão congelada e não avança o checkpoint da carga geral.
 
@@ -46,6 +50,14 @@ python app/run_delivery_tickets.py --apply --target analytics --require-review l
 ```
 
 O destino fica congelado na revisão. Não é permitido usar uma revisão de Weni para gravar no Analytics ou vice-versa. `--import-dir` permite selecionar outra pasta mantendo os mesmos nomes de arquivos. Uma exportação contendo somente Pedido Finalizado não recupera atendimentos marcados apenas com Pedido.
+
+Um novo `--dry-run` não sobrescreve uma revisão existente sem `--archive-review`. Para preparar outra revisão preservando a anterior:
+
+```powershell
+python app/run_delivery_tickets.py --dry-run --planilhas --target weni --review-out logs/delivery_weni_review.json --archive-review
+```
+
+Para retomar, use o comando `--apply --require-review` com o JSON original, sem executar outro dry-run nem editar seus campos ou hashes.
 
 ### Configuração local
 
@@ -90,7 +102,7 @@ O apply relê cada contato e bloqueia alterações nas informações usadas para
 ### Validação e limitações
 
 - Seleciona exatamente as tags Pedido, Pedido is deleted (legada) e Pedido finalizado, desconsiderando maiúsculas e espaços duplicados. Exige encerramento, evidência de atendente e `contact.external_id` válido para o UUID de contato da Weni. IDs internos de contato do Chats não substituem esse vínculo.
-- Deduplica tickets e clientes; consulta primeiro CPFs válidos e depois os inválidos preenchidos, incluindo zero. CPF inválido mantém a exigência de primeiro nome correspondente ou número local do telefone correspondente, do mesmo cliente. Ambiguidade, divergência e dados insuficientes bloqueiam o pedido.
+- Deduplica tickets e clientes; consulta primeiro CPFs válidos e depois os inválidos preenchidos não zerados. Valores ausentes, zerados ou malformados não geram consulta por CPF. CPF inválido preenchido mantém a exigência de primeiro nome correspondente ou número local do telefone correspondente, do mesmo cliente. Ambiguidade, divergência e dados insuficientes bloqueiam o pedido.
 - Usa a lógica oficial de confirmação FarmaLíder já existente, preservando proprietário, itens, descrição, quantidades, preços, status, pagamento e emissão. Uma tag não confirma venda. HTTP 500 não significa ausência de cliente ou pedido.
 - Atualiza os campos `pedido_*`, usando `pedido_data` como referência temporal. A carga Delivery não escreve `ultima_compra`. Não substitui um pedido mais recente na Weni por outro mais antigo. Vendas são todos os estados documentados não cancelados: -2, -1, 0, 4, 1 e 2. Status 3 ou pagamento 0 excluem a venda.
 - `cliente/cpf` informa **somente o último pedido**. Quando o ticket contém um ID estruturado de outro pedido, o comando consulta `pedido/{id}` e exige o mesmo cliente identificado nesta execução. O campo mais recente da Weni é preservado; o pedido histórico entra na planilha. Sem ID, a API não recupera automaticamente todos os pedidos históricos dos tickets. O comando não interpreta a última compra como compra gerada naquele atendimento.

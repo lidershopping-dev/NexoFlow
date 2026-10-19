@@ -42,7 +42,7 @@ def contact(**updates):
         "uuid": CONTACT,
         "name": "Cliente Árvore",
         "fields": {
-            "cpf": "0",
+            "cpf": "123",
             "nome": "Cliente Árvore",
             "email": "arvore@example.test",
         },
@@ -56,7 +56,7 @@ def farm(payload=None):
     payload = payload or {
         "cliente": {
             "id": 101,
-            "cpf": 0,
+            "cpf": 123,
             "nome": "Cliente Árvore",
             "email": "arvore@example.test",
             "telefone": "91987654321",
@@ -181,7 +181,7 @@ class DeliveryTicketsTests(unittest.TestCase):
     def test_invalid_cpf_different_customer_cannot_confirm_order(self):
         bad = contact(
             name="Outra Pessoa",
-            fields={"cpf": "0", "email": "other@example.test"},
+            fields={"cpf": "123", "email": "other@example.test"},
             urns=[],
         )
         plans, data = self.reconcile(contacts=[bad])
@@ -191,7 +191,7 @@ class DeliveryTicketsTests(unittest.TestCase):
             data["tickets"][0]["resultado_validacao"], "CPF_IDENTIDADE_DIVERGENTE"
         )
 
-    def test_valid_cpfs_before_invalid_and_no_identity_shared_by_cpf_zero(self):
+    def test_valid_cpfs_before_invalid_and_no_identity_shared_by_invalid_cpf(self):
         valid = contact(
             uuid="10000000-0000-0000-0000-000000000002", fields={"cpf": "52998224725"}
         )
@@ -210,7 +210,7 @@ class DeliveryTicketsTests(unittest.TestCase):
             self.reconcile(tickets=tickets, contacts=[contact(), valid])
         self.assertEqual(
             [call.args[0]["fields"]["cpf"] for call in resolver.call_args_list],
-            ["52998224725", "0"],
+            ["52998224725", "123"],
         )
 
     def test_no_overwrite_of_newer_weni_order_but_history_export_kept(self):

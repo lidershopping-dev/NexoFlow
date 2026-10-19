@@ -1331,7 +1331,7 @@ def check_weni_update_safety() -> None:
         fail("Checkpoint do Update Weni não pode avançar antes das escritas.")
         return
     ok(
-        "Update Weni audita todo o plano antes de escrever e só avança checkpoint após sucesso."
+        "Update Weni audita antes de escrever; falhas isoladas ficam pendentes para a próxima incremental."
     )
 
     if (

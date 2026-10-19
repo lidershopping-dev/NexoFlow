@@ -1,0 +1,36 @@
+{
+  "timeZone": "America/Belem",
+  "runtimeVersion": "V8",
+  "exceptionLogging": "STACKDRIVER",
+  "oauthScopes": [
+    "https://www.googleapis.com/auth/spreadsheets.readonly"
+  ],
+  "dataStudio": {
+    "name": "NexoFlow 1.0 - Curva ABC",
+    "logoUrl": "https://raw.githubusercontent.com/felipetelesbarbosa/NexoFlow/main/connectors/looker_abc/logo.png",
+    "company": "NexoFlow",
+    "companyUrl": "https://github.com/felipetelesbarbosa/NexoFlow",
+    "addonUrl": "https://github.com/felipetelesbarbosa/NexoFlow/tree/main/connectors/looker_abc",
+    "supportUrl": "https://github.com/felipetelesbarbosa/NexoFlow/issues",
+    "description": "Recalcula produtos, classes ABC e compras conjuntas no período selecionado, lendo as abas BI existentes.",
+    "shortDescription": "Curva ABC pelo período do relatório.",
+    "authType": [
+      "NONE"
+    ],
+    "feeType": [
+      "FREE"
+    ],
+    "sources": [
+      "GOOGLE_SHEETS"
+    ]
+  },
+  "dependencies": {
+    "enabledAdvancedServices": [
+      {
+        "userSymbol": "Sheets",
+        "serviceId": "sheets",
+        "version": "v4"
+      }
+    ]
+  }
+}

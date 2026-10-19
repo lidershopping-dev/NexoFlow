@@ -67,6 +67,20 @@ https://api.farmalider.net.br:3200/farmalider
 
 A escolha é feita pelo estado de rede detectado pelo projeto.
 
+Durante uma execução, falhas recuperáveis provocam até três sondagens do proxy.
+Se ele já estava ativo, uma falha de sondagem e o acesso direto a um site público
+não bastam para desativá-lo: o NexoFlow também precisa receber uma resposta HTTPS
+na URL externa da FarmaLíder, sem seguir redirecionamentos e sem enviar tokens ou
+dados de clientes nesse teste. Se essa rota não for comprovada, o proxy é mantido
+e a operação original segue sua política de tentativas. Isso evita trocar para a
+porta externa bloqueada na rede corporativa. Uma mudança real para rede direta
+continua possível quando a URL externa responde. Os modos explícitos `on` e `off`
+continuam prevalecendo.
+
+O teste de rota verifica conectividade; a disponibilidade e a autenticação da API
+continuam sendo verificadas pelo teste de conexões. Se o proxy ou serviço estiver
+indisponível, o diagnóstico informa a falha em vez de presumir acesso direto.
+
 ## Diagnóstico
 
 `comandos/testar_conexoes.bat` exibe uma linha parecida com:

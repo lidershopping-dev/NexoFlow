@@ -15,8 +15,10 @@ Ao atualizar este repositório, mantenha a identificação pública **NexoFlow 1
 
 - Textos apresentados ao usuário devem usar português brasileiro (pt-BR), com acentos e cedilha. Preserve identificadores técnicos. BAT/CMD em UTF-8 sem BOM com `chcp 65001`; PowerShell em UTF-8 com BOM; HTML com `lang="pt-BR"`; metadados dos executáveis em pt-BR.
 
-- Consultar primeiro CPFs válidos; depois inválidos preenchidos, incluindo zeros. Repor zeros à esquerda até 11 dígitos somente se os dígitos verificadores forem válidos. Não alterar dígitos existentes nem confundir presença na API com validade matemática.
+- Consultar primeiro CPFs válidos; depois inválidos preenchidos não zerados. Valores ausentes, inteiramente zerados ou malformados são pendências cadastrais e não autorizam consulta por CPF. Repor zeros à esquerda até 11 dígitos somente se os dígitos verificadores forem válidos. Não alterar dígitos existentes nem confundir presença na API com validade matemática.
 
 - CPF inválido exige primeiro nome correspondente (normalizando acentos, maiúsculas e símbolos) ou número local do telefone correspondente, ignorando +55 e DDD, do mesmo cliente da Weni. Bloqueie ausência, divergência e ambiguidade; cache compartilhado de CPF não compartilha identidade/pedidos.
+
+- Recompra mantém a política de bloqueio por recusa/Opt-Out, inclusive quando marketing_opt_in está afirmativo; campo vazio não é tratado como consentimento registrado. Novas inclusões e trocas de referência exigem evento D+25 ainda futuro, reconferido antes do POST. A passagem do horário, sozinha, não remove contatos já admitidos com a mesma referência.
 
 - Lançamento com `codProduto=0` e descrição vazia representa frete somente quando a soma desses lançamentos coincide com o frete oficial do cabeçalho. Validar vínculo e valores; não incluir em produtos, quantidades, Recompra ou valor dos produtos e não somar o frete duas vezes.

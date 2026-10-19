@@ -5,8 +5,43 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
+
+
+def _validate_review_destination(path: Path, *, archive_existing: bool) -> None:
+    if path.exists() and not archive_existing:
+        from weni_update import PlanAuditError
+
+        raise PlanAuditError(
+            "Já existe uma revisão Delivery. Para retomar, use --apply --require-review com esse arquivo. "
+            "Para gerar outra revisão preservando a anterior, acrescente --archive-review ao --dry-run."
+        )
+
+
+def _archive_delivery_review(path: Path) -> Path:
+    """Preserva a revisão anterior antes de substituir qualquer arquivo."""
+    archive_root = path.parent / "delivery_historico"
+    archive_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    archive = Path(
+        tempfile.mkdtemp(
+            prefix=f"{path.stem}_{datetime.now(UTC):%Y%m%dT%H%M%SZ}_",
+            dir=archive_root,
+        )
+    )
+    for source in (
+        path,
+        path.with_suffix(".txt"),
+        path.parent / "privado" / f"{path.stem}_conflitos.json",
+    ):
+        if source.exists():
+            copied = archive / source.name
+            shutil.copy2(source, copied)
+            if os.name != "nt":
+                copied.chmod(0o600)
+    return archive
 
 
 def main():
@@ -36,6 +71,11 @@ def main():
         "--require-review", type=Path, help="snapshot Delivery previamente revisado"
     )
     parser.add_argument(
+        "--archive-review",
+        action="store_true",
+        help="preserva a revisão anterior antes de gerar uma nova; somente com --dry-run",
+    )
+    parser.add_argument(
         "--planilhas",
         action="store_true",
         help="usa Conversas_Delivery.xlsx e Contatos_Delivery.xlsx, sem token do Chats",
@@ -54,6 +94,8 @@ def main():
     args = parser.parse_args()
     if args.apply and args.require_review is None:
         parser.error("--apply exige --require-review com o snapshot revisado.")
+    if args.archive_review and not args.dry_run:
+        parser.error("--archive-review exige --dry-run.")
     if os.name == "nt":
         from proxy_config import configure_proxy
 
@@ -74,6 +116,10 @@ def main():
     configure_logging(Path("logs/nexoflow_delivery.log"))
     weni, chats, farm = None, None, None
     try:
+        if args.dry_run:
+            _validate_review_destination(
+                args.review_out, archive_existing=args.archive_review
+            )
         if not getattr(secrets, "WENI_API_TOKEN", ""):
             raise RuntimeError("Token da Weni não configurado.")
         imported = None
@@ -105,8 +151,20 @@ def main():
                 store_factory=store_factory,
                 target=args.target,
             )
+            if result["conflicts"]:
+                print("[AVISO] Reconciliação parcial:", result)
+                if result.get("conflict_report"):
+                    print(
+                        "[INFO] Diagnóstico privado dos conflitos:",
+                        result["conflict_report"],
+                    )
+                print(
+                    "[INFO] Contatos aceitos foram preservados. Retome o mesmo snapshot pelo menu de planilhas; "
+                    "divergências persistentes exigem nova revisão."
+                )
+                return 3
             print("[OK] Reconciliação aplicada:", result)
-            return 3 if result["conflicts"] else 0
+            return 0
         farm = _open_farmalider()
         if farm is None:
             raise RuntimeError(
@@ -156,6 +214,12 @@ def main():
         delivery["target"] = args.target or "both"
         if imported is not None:
             delivery["spreadsheet_import"] = import_report
+        _validate_review_destination(
+            args.review_out, archive_existing=args.archive_review
+        )
+        if args.review_out.exists():
+            archive = _archive_delivery_review(args.review_out)
+            print("[INFO] Revisão anterior preservada em", archive)
         write_delivery_review(plans, delivery, args.review_out)
         if args.require_complete and any(
             str(row.get("resultado_validacao", "")).startswith("ERRO_")

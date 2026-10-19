@@ -27,6 +27,10 @@ from task_progress import TaskProgress
 class WeniError(RuntimeError):
     """Controlled user-facing messages, without raw HTTP exception text."""
 
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
 
 class WeniClient:
     def __init__(self, token: str, *, retry_mutations: bool = True) -> None:
@@ -58,6 +62,7 @@ class WeniClient:
         json_body: dict[str, Any] | None = None,
     ) -> Any:
         last_error = "erro desconhecido"
+        last_status = None
         max_attempts = (
             MAX_RETRIES if method.upper() == "GET" or self.retry_mutations else 1
         )
@@ -79,10 +84,13 @@ class WeniClient:
                     )
 
                 if response.status_code == 401:
-                    raise WeniError("Weni retornou 401. Verifique o token da API.")
+                    raise WeniError(
+                        "Weni retornou 401. Verifique o token da API.", status_code=401
+                    )
                 if response.status_code == 403:
                     raise WeniError(
-                        "Weni retornou 403 (acesso negado). Confira permissões do token e regras de acesso."
+                        "Weni retornou 403 (acesso negado). Confira permissões do token e regras de acesso.",
+                        status_code=403,
                     )
 
                 if response.status_code == 429 or response.status_code >= 500:
@@ -109,6 +117,7 @@ class WeniClient:
                 raise
             except (requests.RequestException, ValueError) as exc:
                 if isinstance(exc, requests.RequestException):
+                    last_status = getattr(exc.response, "status_code", None)
                     failure = classify_network_failure(exc)
                     last_error = failure.summary
                     if not failure.retryable:
@@ -135,7 +144,8 @@ class WeniClient:
                 time.sleep(wait)
 
         raise WeniError(
-            f"Não foi possível acessar a API da Weni. Diagnóstico: {last_error}"
+            f"Não foi possível acessar a API da Weni. Diagnóstico: {last_error}",
+            status_code=last_status,
         ) from None
 
     def _get_json(
@@ -380,6 +390,38 @@ class WeniClient:
             },
         )
         return payload if isinstance(payload, dict) else {"result": payload}
+
+    def interrupt_contact_flows(self, contact_uuid: str) -> None:
+        """Interrompe os fluxos do contato exato, sem repetir mutações."""
+        self._dedup_mutation(
+            "POST",
+            WENI_CONTACT_ACTIONS_API_URL,
+            contact_uuid,
+            {"contacts": [contact_uuid], "action": "interrupt"},
+        )
+
+    def delete_contact(self, contact_uuid: str) -> None:
+        """Exclusão usada somente depois da revisão e das validações de identidade."""
+        self._dedup_mutation("DELETE", WENI_CONTACTS_API_URL, contact_uuid)
+
+    def _dedup_mutation(self, method, url, contact_uuid, body=None):
+        from uuid import UUID
+
+        try:
+            parsed = UUID(contact_uuid)
+            valid = parsed.int and str(parsed) == contact_uuid.lower()
+        except (ValueError, TypeError, AttributeError):
+            valid = False
+        if not valid:
+            raise ValueError("UUID inválido para a deduplicação.")
+        if self.retry_mutations:
+            raise ValueError("A deduplicação exige cliente com retry_mutations=False.")
+        return self._request_json(
+            method,
+            url,
+            params={"uuid": contact_uuid} if method == "DELETE" else None,
+            json_body=body,
+        )
 
     def list_fields(self, key: str | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {}

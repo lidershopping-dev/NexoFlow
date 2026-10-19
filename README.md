@@ -804,3 +804,7 @@ Esse comando utiliza o histórico do Sheets e não consulta Weni ou FarmaLíder.
 ## Verificação de qualidade
 
 Para verificar o código, instale `requirements-dev.txt` em um ambiente de desenvolvimento e execute `ruff check .`, `pyright` e `pip-audit -r requirements.txt -r requirements-webhook.txt`. Essas ferramentas não são necessárias para usar o programa instalado. O fluxo de publicação também verifica os testes no Windows com Python 3.11 e 3.14, com e sem o modo UTF-8 do Python.
+
+## Contatos duplicados
+
+O NexoFlow Weni inclui a deduplicação no dry-run e na aplicação. Somente contatos comprovados nas APIs são excluídos; pedidos reais e recusas são preservados, com limpeza das fontes do Sheets e do Looker. Consulte [Deduplicação na rotina Weni](docs/deduplicacao_weni.md).

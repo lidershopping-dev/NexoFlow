@@ -503,6 +503,15 @@ raise SystemExit(int(decision.read_text(encoding='ascii')))
                 batch = batch.replace(" < CON", "").replace(
                     '".venv\\Scripts\\python.exe"', f'"{sys.executable}"'
                 )
+                batch, editor_count = re.subn(
+                    r'(?m)^start "" notepad\.exe (.+)$',
+                    lambda match, directory=directory: (
+                        f'start "" /b "{sys.executable}" "{directory / "notepad_stub.py"}" '
+                        + match.group(1)
+                    ),
+                    batch,
+                )
+                self.assertEqual(editor_count, 1)
                 batch, count = re.subn(
                     r'(?m)^"%SystemRoot%\\System32\\WindowsPowerShell\\v1\.0\\powershell\.exe"[^\n]*confirmar_revisao_weni\.ps1[^\n]*$',
                     lambda match, directory=directory: (
@@ -540,6 +549,23 @@ raise SystemExit(int(decision.read_text(encoding='ascii')))
                             process,
                             output_path,
                             "incremental approval",
+                        )
+                        self._wait_until(
+                            lambda directory=directory: (
+                                directory / "notepad_closed.json"
+                            ).exists(),
+                            process,
+                            output_path,
+                            "incremental report opened",
+                        )
+                        opened = json.loads(
+                            (directory / "notepad_closed.json").read_text(
+                                encoding="utf-8"
+                            )
+                        )
+                        self.assertEqual(
+                            Path(opened[0]),
+                            directory / "logs" / "weni_update_review.txt",
                         )
                         self.assertFalse((directory / "apply.json").exists())
                         pending = directory / "review_decision.pending"

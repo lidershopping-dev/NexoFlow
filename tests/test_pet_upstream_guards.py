@@ -124,6 +124,7 @@ class PetUpstreamGuardTests(unittest.TestCase):
 
     def test_human_and_packaging_pet_do_not_cancel_same_date_campaign(self):
         for name in (
+            "CURATIVO TOPZ PATRULHA CANINA C/25",
             "Shampoo hidratante para humanos 200 ml",
             "Protetor solar embalagem PET 100 ml",
             "Creme para hidratação 200 g",
@@ -134,6 +135,15 @@ class PetUpstreamGuardTests(unittest.TestCase):
                     self.assertNotIn("pedido_data", plan.fields)
                     self.assertFalse(plan.order_has_animal_products)
                     self.assertEqual(plan.group_actions, [])
+
+    def test_new_veterinary_brands_remove_group_in_weni_and_spreadsheet_loads(self):
+        for name in ("MACROGARD PASTA 60G", "BECORDIL 5MG C/30 CPR"):
+            for target in ("weni", "planilhas"):
+                with self.subTest(name=name, target=target):
+                    plan = build_plan(target, contact(), purchase(name))
+                    self.assertTrue(plan.order_has_animal_products)
+                    self.assertEqual(plan.group_actions[0].action, "remove")
+                    self.assertEqual(plan.group_actions[0].group, GROUP_UUID)
 
     def test_unchanged_pet_products_do_not_introduce_unreviewed_group_change(self):
         for target in ("weni", "planilhas"):

@@ -41,7 +41,7 @@ def customer_payload(
     name="Cliente Árvore",
     email="arvore@example.test",
     phone="91987654321",
-    cpf=0,
+    cpf=123,
     order_id=201,
 ):
     return {
@@ -84,7 +84,7 @@ def weni_contact(
     name="Cliente Árvore",
     email="arvore@example.test",
     phone="91987654321",
-    cpf="0",
+    cpf="123",
     pedido_id=None,
 ):
     fields = {"cpf": cpf, "nome": name, "email": email}
@@ -175,7 +175,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
         for local, status in cases:
             with self.subTest(identity=local):
                 self.assertEqual(
-                    cliente_link_status("0", payload, weni_identity=local)[0], status
+                    cliente_link_status("123", payload, weni_identity=local)[0], status
                 )
 
     def test_invalid_cpf_phone_matching_accepts_local_number_and_different_ddd(self):
@@ -183,7 +183,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             with self.subTest(phone=phone):
                 self.assertEqual(
                     cliente_link_status(
-                        "0",
+                        "123",
                         customer_payload(),
                         weni_identity=identity(name="🌻", email="", phone=phone),
                     )[0],
@@ -191,7 +191,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
                 )
         self.assertEqual(
             cliente_link_status(
-                "0",
+                "123",
                 customer_payload(phone="987654321"),
                 weni_identity=identity(name="🌻", email="", phone="91987654321"),
             )[0],
@@ -201,7 +201,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
     def test_first_name_matching_ignores_accents_symbols_and_surnames(self):
         self.assertEqual(
             cliente_link_status(
-                "0",
+                "123",
                 customer_payload(name="Felipe Balcão", phone=""),
                 weni_identity=identity(
                     name="💫 FÉLIPE Outro Sobrenome", email="", phone=""
@@ -210,7 +210,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             "CPF_INVALIDO_ENCONTRADO",
         )
         result, selected = select_cliente_response(
-            "0",
+            "123",
             [
                 customer_payload(name="Felipe Um", phone=""),
                 customer_payload(102, name="Felipe Dois", phone=""),
@@ -231,11 +231,11 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             with self.subTest(name=name):
                 local = identity(name=name, email="", phone="")
                 self.assertEqual(
-                    cliente_link_status("0", candidates[0], weni_identity=local)[0],
+                    cliente_link_status("123", candidates[0], weni_identity=local)[0],
                     "CPF_INVALIDO_ENCONTRADO",
                 )
                 result, selected = select_cliente_response(
-                    "0", candidates, weni_identity=local
+                    "123", candidates, weni_identity=local
                 )
                 self.assertEqual(result[0], "CPF_IDENTIDADE_AMBIGUA")
                 self.assertIsNone(selected)
@@ -246,7 +246,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
                 local = identity(name=name, email="", phone="")
                 self.assertEqual(
                     cliente_link_status(
-                        "0",
+                        "123",
                         customer_payload(name="Ana Balcão", phone=""),
                         weni_identity=local,
                     )[0],
@@ -254,7 +254,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     cliente_link_status(
-                        "0",
+                        "123",
                         customer_payload(name="Anamaria Balcão", phone=""),
                         weni_identity=local,
                     )[0],
@@ -266,7 +266,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             with self.subTest(identity=weni_identity):
                 self.assertEqual(
                     cliente_link_status(
-                        "0", customer_payload(), weni_identity=weni_identity
+                        "123", customer_payload(), weni_identity=weni_identity
                     ),
                     ("CPF_INVALIDO_ENCONTRADO", "101", "Cliente Árvore"),
                 )
@@ -276,19 +276,19 @@ class InvalidCpfIdentityTests(unittest.TestCase):
         local["weni_name"] = "CLIENTE F SOUZA"
         payload = customer_payload(name="Cliente F Souza")
         self.assertEqual(
-            cliente_link_status("0", payload, weni_identity=local)[0],
+            cliente_link_status("123", payload, weni_identity=local)[0],
             "CPF_INVALIDO_ENCONTRADO",
         )
         local["email"] = "other@example.test"
         local["telefone"] = "11911112222"
         self.assertEqual(
-            cliente_link_status("0", payload, weni_identity=local)[0],
+            cliente_link_status("123", payload, weni_identity=local)[0],
             "CPF_INVALIDO_ENCONTRADO",
         )
         local["nome"] = "Outra Pessoa"
         local["weni_name"] = "Outra Pessoa"
         self.assertEqual(
-            cliente_link_status("0", payload, weni_identity=local)[0],
+            cliente_link_status("123", payload, weni_identity=local)[0],
             "CPF_IDENTIDADE_DIVERGENTE",
         )
 
@@ -304,7 +304,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
 
     def test_name_and_email_comparison_normalizes_case_accents_and_spaces(self):
         result = cliente_link_status(
-            "00000000000",
+            "00000000123",
             customer_payload(),
             weni_identity=identity(
                 name="  CLIENTE   ARVORE  ", email="  ARVORE@EXAMPLE.TEST  ", phone=""
@@ -317,7 +317,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             with self.subTest(phone=phone):
                 self.assertEqual(
                     cliente_link_status(
-                        "0",
+                        "123",
                         customer_payload(),
                         weni_identity=identity(email="", phone=phone),
                     )[0],
@@ -330,7 +330,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             with self.subTest(api_phone=api_phone, weni_phone=weni_phone):
                 self.assertEqual(
                     cliente_link_status(
-                        "0",
+                        "123",
                         customer_payload(email="", phone=api_phone),
                         weni_identity=identity(
                             name="Nome diferente", email="", phone=weni_phone
@@ -342,14 +342,14 @@ class InvalidCpfIdentityTests(unittest.TestCase):
     def test_first_name_suffices_but_email_alone_does_not_establish_identity(self):
         self.assertEqual(
             cliente_link_status(
-                "0",
+                "123",
                 customer_payload(),
                 weni_identity=identity(name="Cliente", phone=""),
             )[0],
             "CPF_INVALIDO_ENCONTRADO",
         )
         result = cliente_link_status(
-            "0",
+            "123",
             customer_payload(email="same", phone=""),
             weni_identity=identity(name="Outro cliente", email="same", phone=""),
         )
@@ -374,7 +374,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
         ]:
             with self.subTest(shape=payload):
                 result, selected = select_cliente_response(
-                    "0", payload, weni_identity=identity()
+                    "123", payload, weni_identity=identity()
                 )
                 self.assertEqual(result[0:2], ("CPF_INVALIDO_ENCONTRADO", "101"))
                 self.assertIsInstance(selected, dict)
@@ -383,7 +383,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
 
     def test_no_matching_candidate_blocks_even_with_other_customers_present(self):
         result, selected = select_cliente_response(
-            "0",
+            "123",
             [customer_payload(), customer_payload(102, order_id=202)],
             weni_identity=identity(name="Pessoa ausente", phone="92911112222"),
         )
@@ -392,7 +392,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
 
     def test_two_distinct_matching_customers_are_ambiguous(self):
         result, selected = select_cliente_response(
-            "0",
+            "123",
             [customer_payload(), customer_payload(102, order_id=202)],
             weni_identity=identity(),
         )
@@ -401,7 +401,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
 
     def test_conflicting_snapshots_for_same_customer_fail_closed(self):
         result, selected = select_cliente_response(
-            "0",
+            "123",
             [customer_payload(), customer_payload(order_id=202)],
             weni_identity=identity(),
         )
@@ -413,7 +413,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
         for payload in [customer_payload(cpf=1), customer_payload(identifier=0)]:
             with self.subTest(customer=payload["cliente"]):
                 result, selected = select_cliente_response(
-                    "0", payload, weni_identity=identity()
+                    "123", payload, weni_identity=identity()
                 )
                 self.assertNotEqual(result[0], "CPF_INVALIDO_ENCONTRADO")
                 self.assertEqual(result[1:], ("", ""))
@@ -434,7 +434,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             "uuid": "synthetic-wrapped",
             "name": "Nome do canal",
             "fields": {
-                "cpf": {"value": "0"},
+                "cpf": {"value": "123"},
                 "nome": {"value": "Cliente Árvore"},
                 "email": {"value": ""},
             },
@@ -548,9 +548,9 @@ class InvalidCpfIdentityTests(unittest.TestCase):
         self.assertEqual(
             {item["contact_uuid"] for item in items}, {"synthetic-a", "synthetic-b"}
         )
-        farm.get_cliente_by_cpf.assert_called_once_with("0")
+        farm.get_cliente_by_cpf.assert_called_once_with("123")
         self.assertEqual(payload, original_payload)
-        self.assertTrue(all(contact["fields"]["cpf"] == "0" for contact in contacts))
+        self.assertTrue(all(contact["fields"]["cpf"] == "123" for contact in contacts))
 
     def test_raw_contact_identity_map_preserves_ambiguity_hidden_by_normalized_phone(
         self,
@@ -696,7 +696,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
             existing_by_uuid={row["contact_uuid"]: existing},
             reuse_existing=True,
         )
-        farm.get_cliente_by_cpf.assert_called_once_with("0")
+        farm.get_cliente_by_cpf.assert_called_once_with("123")
         self.assertEqual(stats.cache_reused, 0)
         self.assertEqual(row["farmalider_cliente_id"], "101")
 
@@ -910,7 +910,7 @@ class InvalidCpfIdentityTests(unittest.TestCase):
                     side_effect=lambda _: nullcontext(RequestPermit(0, 4)),
                 ),
             ):
-                self.assertEqual(client.get_cliente_by_cpf("0"), [customer_payload()])
+                self.assertEqual(client.get_cliente_by_cpf("123"), [customer_payload()])
                 with self.assertRaises(FarmaliderError):
                     client.get_pedido("201")
                 # O contrato de pedido é objeto ou ausência; nunca lista.

@@ -22,7 +22,10 @@ function Confirm-WeniReview {
             $message = @"
 O dry-run incremental foi concluído e auditado.
 
-Para autorizar a gravação das mudanças na Weni, digite exatamente:
+A aplicação inclui as exclusões de duplicados propostas no relatório
+e a limpeza das fontes do Google Sheets e do Looker.
+
+Para autorizar as alterações revisadas, digite exatamente:
 
 $expected
 

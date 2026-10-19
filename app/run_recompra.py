@@ -5,6 +5,8 @@ import json
 import logging
 from pathlib import Path
 
+from requests import RequestException
+
 
 def build_parser():
     from config import FARMALIDER_MAX_WORKERS
@@ -73,6 +75,7 @@ def main(argv=None):
         ReviewExpiredError,
         diagnose_state,
         ensure_review_current,
+        finalize_review,
         now_local,
         read_review,
         safe_error_frames,
@@ -166,13 +169,22 @@ def main(argv=None):
             # Uma varredura de contatos é necessária para detectar D+26, novas
             # compras e recusas em todos os membros, mesmo no incremental.
             contacts = weni.iter_contacts()
+        pagination = {}
         plans = build_plans(
-            contacts, farm, structure, state, now=now, workers=args.workers
+            contacts,
+            farm,
+            structure,
+            state,
+            now=now,
+            workers=args.workers,
+            pagination_stats=pagination,
         )
         review = make_review(plans, structure, now=now, state=state)
+        review["pagination"] = pagination
         # Os planos usam o relógio capturado antes da varredura. Não publicar
         # esses planos sob a data nova se a geração atravessou a meia-noite.
         ensure_review_current(review, now_local())
+        finalize_review(review, now_local())
         write_review(review, args.review_out)
         ensure_review_current(review, now_local())
         if args.require_complete and any(
@@ -198,14 +210,23 @@ def main(argv=None):
         return REVIEW_EXPIRED_EXIT_CODE if exc.allow_refresh else 1
     except Exception as exc:
         logging.error(
-            "Recompra falhou: tipo=%s; origem=%s.",
+            "Recompra falhou: tipo=%s; errno=%s; winerror=%s; origem=%s.",
             type(exc).__name__,
+            getattr(exc, "errno", None),
+            getattr(exc, "winerror", None),
             " > ".join(safe_error_frames(exc)),
         )
         print(
             "[ERRO] "
             + (
-                str(exc)
+                "Falha ao acessar um arquivo local da Recompra "
+                f"({type(exc).__name__}, errno={getattr(exc, 'errno', None)}, "
+                f"winerror={getattr(exc, 'winerror', None)}). "
+                "Verifique as permissões da pasta logs e se há bloqueio por outro processo "
+                "ou antivírus. Preserve o estado e a auditoria; gere uma nova revisão "
+                "antes de retomar."
+                if isinstance(exc, OSError) and not isinstance(exc, RequestException)
+                else str(exc)
                 if isinstance(exc, (RuntimeError, ValueError))
                 else "Falha de API. Consulte o diagnóstico seguro."
             )

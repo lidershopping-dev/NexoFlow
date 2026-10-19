@@ -50,6 +50,7 @@ from farmalider_client import (
 )
 from farmalider_integration import (
     cliente_link_status,
+    cpf_cadastro_status,
     resolve_contact_order,
     weni_customer_identity,
 )
@@ -113,6 +114,7 @@ class ClienteValidationStats:
     confirmed: int = 0
     not_found: int = 0
     invalid: int = 0
+    invalid_registration: int = 0
     api_errors: int = 0
     prior_details_retained: int = 0
     http_requests: int = 0
@@ -419,8 +421,13 @@ def validate_contacts(
         row["farmalider_cliente_id"] = ""
         row["farmalider_cliente_nome"] = ""
 
-        if not cpf:
-            row["farmalider_cliente_status"] = "CPF_NAO_INFORMADO"
+        cadastro_status = cpf_cadastro_status(row.get("cpf", ""))
+        if cadastro_status:
+            row["farmalider_cliente_status"] = cadastro_status
+            if cadastro_status == "CPF_INVALIDO_CADASTRO":
+                stats.invalid_registration += 1
+            if cpf and cliente_lookup_status_by_cpf is not None:
+                cliente_lookup_status_by_cpf[cpf] = cadastro_status
             continue
 
         if farm_client is None:
@@ -688,6 +695,12 @@ def validate_contacts(
     if stats.invalid:
         logging.info(
             "FarmaLíder: identidade de contatos com CPF inválido: %s.", identity_counts
+        )
+    if stats.invalid_registration:
+        logging.info(
+            "FarmaLíder: %s contato(s) com CPF inválido no cadastro; "
+            "nenhuma consulta enviada para esses valores. Originais preservados.",
+            stats.invalid_registration,
         )
     stats.elapsed_seconds = time.monotonic() - started
     return stats

@@ -8,6 +8,7 @@ import time
 import urllib.request
 from dataclasses import dataclass
 from http.client import HTTPException
+from urllib.error import HTTPError
 from urllib.parse import quote
 
 from project_paths import load_private_settings
@@ -120,6 +121,38 @@ def _direct_internet_available(timeout: float) -> bool:
         return False
 
 
+class _NoProbeRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _direct_farmalider_available(timeout: float) -> bool:
+    """Probe the external service over HTTPS, without tokens or customer data.
+
+    An unrelated public site being reachable does not establish access to the
+    external FarmaLíder port. Do not follow redirects to login/block pages.
+    """
+    from config import FARMALIDER_API_BASE_URL_EXTERNAL
+
+    try:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _NoProbeRedirect()
+        )
+        request = urllib.request.Request(
+            FARMALIDER_API_BASE_URL_EXTERNAL,
+            method="HEAD",
+            headers={"User-Agent": "NexoFlow/1.0"},
+        )
+        with opener.open(request, timeout=max(timeout, 3.0)) as response:
+            return 200 <= response.status < 300
+    except HTTPError as exc:
+        # These responses establish reachability without credentials. A blocked
+        # route (403/407), redirect, timeout, throttling or 5xx is not proof.
+        return exc.code in {401, 404, 405}
+    except (OSError, HTTPException):
+        return False
+
+
 def _build_proxy_url(
     host: str,
     port: int,
@@ -192,7 +225,9 @@ def _activate_proxy(
         os.environ.pop("no_proxy", None)
 
 
-def configure_proxy(*, detection_attempts: int | None = None) -> ProxyStatus:
+def configure_proxy(
+    *, detection_attempts: int | None = None, preserve_active_proxy: bool = False
+) -> ProxyStatus:
     """
     Configura proxy somente para o processo Python atual.
 
@@ -312,6 +347,26 @@ def configure_proxy(*, detection_attempts: int | None = None) -> ProxyStatus:
     # realmente direta, sem usar o proxy do Windows.
     direct_available = _direct_internet_available(timeout)
 
+    if preserve_active_proxy and (
+        not direct_available or not _direct_farmalider_available(timeout)
+    ):
+        _activate_proxy(
+            host=host, port=port, user=user, password=password, bypass=bypass
+        )
+        return ProxyStatus(
+            mode=mode,
+            configured=True,
+            reachable=False,
+            active=True,
+            host=host,
+            port=port,
+            has_credentials=has_credentials,
+            reason=(
+                "sondagens do proxy falharam, mas o acesso direto à FarmaLíder "
+                "não foi comprovado; mantendo o proxy já ativo"
+            ),
+        )
+
     if direct_available:
         _force_direct_mode()
         return ProxyStatus(
@@ -400,11 +455,13 @@ def refresh_network_route(*, reason: str = "falha de rede") -> NetworkRouteRefre
     Redetecta a rota durante uma execução já em andamento.
 
     É acionada após uma falha de rede recuperável. Assim uma carga longa pode
-    migrar direta <-> proxy sem reiniciar o processo.
+    migrar direta <-> proxy sem reiniciar o processo. Um proxy já ativo só é
+    abandonado após as sondagens TCP e a confirmação da URL externa FarmaLíder;
+    acesso a um site público isolado não comprova essa rota.
     """
     with _ROUTE_REFRESH_LOCK:
         previous_active = _proxy_active_from_env()
-        status = configure_proxy(detection_attempts=1)
+        status = configure_proxy(preserve_active_proxy=previous_active is True)
         current_active = bool(status.active)
         changed = previous_active is not None and previous_active != current_active
 
@@ -417,9 +474,10 @@ def refresh_network_route(*, reason: str = "falha de rede") -> NetworkRouteRefre
             )
         else:
             logging.info(
-                "NexoFlow revalidou a rota após %s; mantendo conexão %s.",
+                "NexoFlow revalidou a rota após %s; mantendo conexão %s. %s.",
                 reason,
                 "via proxy" if current_active else "direta",
+                status.reason,
             )
 
         return NetworkRouteRefresh(

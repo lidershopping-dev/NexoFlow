@@ -46,6 +46,10 @@ def fixture(
     days=25, *, order_id="100", grouped=False, marketing="", status="2", payment="3"
 ):
     dt = NOW - timedelta(days=days)
+    if days == 25:
+        # Admission fixtures model a still-future D+25 event. Past/equal
+        # deadlines are covered separately and must never authorize a POST.
+        dt += timedelta(minutes=1)
     contact = {
         "uuid": "u1",
         "name": "Cliente Sintético",
@@ -413,7 +417,7 @@ class RecompraIntegrationTests(unittest.TestCase):
         self,
     ):
         c, o, i = fixture()
-        c["fields"]["cpf"] = "0"
+        c["fields"]["cpf"] = "123"
         cache = {}
         farm = Mock()
         farm.get_cliente_by_cpf.return_value = {"clientes": []}

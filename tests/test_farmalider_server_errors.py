@@ -403,7 +403,7 @@ class FarmaliderServerErrorTests(unittest.TestCase):
 
         farm.get_cliente_by_cpf.side_effect = fail
         rows = [
-            {"contact_uuid": f"contact-{index}", "cpf": f"{index:011d}"}
+            {"contact_uuid": f"contact-{index}", "cpf": f"{index + 1000:011d}"}
             for index in range(200)
         ]
         with (
@@ -427,7 +427,7 @@ class FarmaliderServerErrorTests(unittest.TestCase):
         farm = Mock()
 
         def query(cpf: str):
-            if int(cpf) < 30:
+            if int(cpf) < 1030:
                 raise FarmaliderError("HTTP 500")
             time.sleep(0.002)
             return None  # A 404 is a successful HTTP consultation.
@@ -446,7 +446,7 @@ class FarmaliderServerErrorTests(unittest.TestCase):
             "effective_delay_ms": 10.0,
         }
         rows = [
-            {"contact_uuid": f"contact-{index}", "cpf": f"{index:011d}"}
+            {"contact_uuid": f"contact-{index}", "cpf": f"{index + 1000:011d}"}
             for index in range(100)
         ]
         with (

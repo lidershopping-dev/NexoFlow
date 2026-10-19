@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import tempfile
 import traceback
 import unicodedata
 from collections import Counter, OrderedDict
 from concurrent.futures import Future, ThreadPoolExecutor
-from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime, timedelta
 from hashlib import sha256
@@ -30,6 +30,7 @@ from config import FARMALIDER_MAX_WORKERS, WENI_UPDATE_STATE_FILE
 from farmalider_client import FarmaliderError
 from farmalider_integration import (
     _positive_id,
+    cpf_cadastro_status,
     resolve_contact_order,
     select_cliente_response,
     weni_customer_identity,
@@ -51,9 +52,13 @@ from purchase_checks import (
     official_order_resolves_check,
     register_pending_purchase_checks,
 )
+from recompra_lock import state_lock
+from recompra_review_audit import public_review_lines
 
 GROUP = "Recompra FarmaLíder"
-PRODUCT_POLICY = f"JANELA_0_A_25_SEM_RECUSA_PRODUTOS_HUMANOS_{PHARMACY_SCOPE_VERSION}"
+PRODUCT_POLICY = (
+    f"JANELA_0_A_25_SEM_RECUSA_PRODUTOS_HUMANOS_{PHARMACY_SCOPE_VERSION}_EXECUCAO_V2"
+)
 OPT_OUT = "Opt-Out Marketing"
 FLOW = "Recompra FarmaLíder D+25"
 TZ = ZoneInfo("America/Belem")
@@ -177,37 +182,105 @@ class RecompraReadCache:
             }
 
 
-def iter_prioritized_contacts(contacts):
-    """Processa válidos durante a paginação; adia os demais em disco.
+class _ConflictingPaginationContact(dict):
+    """Somente o UUID divergente, sem escolher uma das identidades recebidas."""
 
-    Mantém a prioridade global de CPF sem guardar toda a base em memória.
-    O diretório temporário é privado e removido também em caso de falha.
+
+def iter_prioritized_contacts(contacts, *, pagination_stats=None):
+    """Consolida UUIDs em disco antes de consultar qualquer identidade.
+
+    Uma página posterior pode trazer outro cadastro para um UUID já recebido.
+    Por isso a leitura completa precede as consultas, com memória limitada e
+    arquivos privados removidos mesmo quando a fonte ou um consumidor falha.
     """
+    stats = {
+        "contatos_recebidos": 0,
+        "uuids_unicos": 0,
+        "duplicatas_identicas": 0,
+        "repeticoes_divergentes": 0,
+        "uuids_divergentes": 0,
+    }
+    if pagination_stats is not None:
+        pagination_stats.update(stats)
     with tempfile.TemporaryDirectory(prefix="nexoflow-recompra-") as directory:
-        paths = {
-            priority: Path(directory) / f"cpf-{priority}.jsonl" for priority in (1, 2)
-        }
-        with (
-            paths[1].open("w", encoding="utf-8") as invalid,
-            paths[2].open("w", encoding="utf-8") as empty,
-        ):
-            outputs = {1: invalid, 2: empty}
-            for contact in contacts:
-                priority = cpf_query_priority(get_fields(contact).get("cpf"))
-                if priority == 0:
-                    yield contact
-                else:
-                    outputs[priority].write(
-                        json.dumps(contact, ensure_ascii=False) + "\n"
+        filename = Path(directory) / "contatos.sqlite3"
+        fd = os.open(filename, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+        os.close(fd)
+        database = sqlite3.connect(filename)
+        try:
+            database.execute("PRAGMA cache_size = -2048")
+            database.execute("PRAGMA temp_store = FILE")
+            database.execute(
+                "CREATE TABLE contacts (uuid TEXT PRIMARY KEY, payload TEXT NOT NULL, "
+                "priority INTEGER NOT NULL, position INTEGER NOT NULL, "
+                "conflicted INTEGER NOT NULL DEFAULT 0)"
+            )
+            for position, contact in enumerate(contacts):
+                uid = contact.get("uuid")
+                if not isinstance(uid, str) or not uid.strip():
+                    raise RuntimeError(
+                        "A paginação contém contato sem UUID; nenhuma consulta iniciada."
                     )
-        for priority in (1, 2):
-            with paths[priority].open(encoding="utf-8") as handle:
-                for line in handle:
-                    yield json.loads(line)
+                payload = json.dumps(
+                    contact, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+                )
+                existing = database.execute(
+                    "SELECT payload, conflicted FROM contacts WHERE uuid = ?", (uid,)
+                ).fetchone()
+                stats["contatos_recebidos"] += 1
+                if existing is None:
+                    database.execute(
+                        "INSERT INTO contacts (uuid, payload, priority, position) "
+                        "VALUES (?, ?, ?, ?)",
+                        (
+                            uid,
+                            payload,
+                            cpf_query_priority(get_fields(contact).get("cpf")),
+                            position,
+                        ),
+                    )
+                    stats["uuids_unicos"] += 1
+                elif payload == existing[0]:
+                    stats["duplicatas_identicas"] += 1
+                else:
+                    stats["repeticoes_divergentes"] += 1
+                    if not existing[1]:
+                        database.execute(
+                            "UPDATE contacts SET conflicted = 1 WHERE uuid = ?", (uid,)
+                        )
+                        stats["uuids_divergentes"] += 1
+            database.commit()
+            if pagination_stats is not None:
+                pagination_stats.update(stats)
+            logging.info(
+                "Recompra: paginação consolidada | recebidos=%s | UUIDs únicos=%s | "
+                "repetições idênticas=%s | UUIDs divergentes=%s.",
+                stats["contatos_recebidos"],
+                stats["uuids_unicos"],
+                stats["duplicatas_identicas"],
+                stats["uuids_divergentes"],
+            )
+            for uid, payload, conflicted in database.execute(
+                "SELECT uuid, payload, conflicted FROM contacts "
+                "ORDER BY CASE WHEN conflicted = 1 THEN 3 ELSE priority END, position"
+            ):
+                if conflicted:
+                    yield _ConflictingPaginationContact(uuid=uid)
+                else:
+                    yield json.loads(payload)
+        finally:
+            database.close()
 
 
 def build_plans(
-    contacts, farm, structure, state, *, now=None, workers=FARMALIDER_MAX_WORKERS
+    contacts,
+    farm,
+    structure,
+    state,
+    *,
+    now=None,
+    workers=FARMALIDER_MAX_WORKERS,
+    pagination_stats=None,
 ):
     """GETs concorrentes e limitados; Weni e estado permanecem na thread principal."""
     if not 1 <= workers <= FARMALIDER_MAX_WORKERS:
@@ -219,11 +292,37 @@ def build_plans(
     started = monotonic()
 
     def plan_contact(contact):
+        if isinstance(contact, _ConflictingPaginationContact):
+            return {
+                "contact_uuid": contact["uuid"],
+                "guard": guard(contact),
+                "fields": {},
+                "action": "",
+                "reason": "CONTATO_DUPLICADO_DIVERGENTE",
+                "order_resolution_status": "CONTATO_DUPLICADO_DIVERGENTE",
+                "order_id": "",
+                "purchase": None,
+                "in_group": False,
+                "event_at": "",
+                "due_today": False,
+                "within_window": False,
+                "scheduled_future": False,
+                "warnings": [
+                    "O mesmo UUID veio com cadastros divergentes na paginação; "
+                    "nenhuma consulta, alteração ou gravação de estado foi proposta. "
+                    "Revalidar na próxima revisão."
+                ],
+                "campaign_products": [],
+            }
         saved = _saved_with_purchase_check(state, contact["uuid"])
+        if refused(contact) or member(contact, structure["opt_out_uuid"], OPT_OUT):
+            # Uma recusa já impede a campanha independentemente do pedido;
+            # a remoção não precisa consultar ou validar uma compra na API.
+            return propose(contact, None, [], structure, saved, now=now)
         order, items = _resolve_checked_contact(contact, reads, now.isoformat(), saved)
         return propose(contact, order, items, structure, saved, now=now)
 
-    prioritized = iter_prioritized_contacts(contacts)
+    prioritized = iter_prioritized_contacts(contacts, pagination_stats=pagination_stats)
     try:
         with ThreadPoolExecutor(
             max_workers=workers, thread_name_prefix="recompra"
@@ -402,10 +501,34 @@ def atomic_json(path, value):
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(filename, path)
+        # Antivirus/indexers can briefly hold the destination open on Windows.
+        # Retry only the local atomic replacement of the already flushed file;
+        # never replay Weni writes or remove/truncate the previous state.
+        for attempt in range(6):
+            try:
+                os.replace(filename, path)
+                break
+            except PermissionError:
+                if attempt == 5:
+                    raise
+                logging.warning(
+                    "Recompra: arquivo local temporariamente bloqueado; "
+                    "nova tentativa de gravação %s/5, sem repetir ações na Weni.",
+                    attempt + 1,
+                )
+                sleep(min(2.0, 0.2 * 2**attempt))
     finally:
-        if os.path.exists(filename):
+        try:
             os.unlink(filename)
+        except FileNotFoundError:
+            pass
+        except OSError:
+            # Cleanup must not conceal the actual failure or turn a confirmed
+            # replacement into an apparent failure that might prompt a replay.
+            logging.warning(
+                "Recompra: não foi possível remover um arquivo temporário local. "
+                "Preserve o estado e a auditoria."
+            )
 
 
 def load_state(path=STATE, *, purchase_checks_path=None):
@@ -455,25 +578,6 @@ def _resolve_checked_contact(contact, farm, captured_at, saved):
         if contact_pending_purchase_check(contact, saved.get("pending_purchase_check")):
             return {"status_confirmacao": "ERRO_API"}, []
         raise
-
-
-@contextmanager
-def state_lock(path=STATE):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(".lock")
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise RuntimeError(
-            "Outra carga de recompra está em execução ou foi interrompida. Verifique antes de remover o lock."
-        ) from exc
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(str(os.getpid()))
-        yield
-    finally:
-        lock.unlink(missing_ok=True)
 
 
 def validate_flow_guards(flow, opt_out_uuid):
@@ -645,6 +749,9 @@ def inspect_structure(weni):
 def resolve_latest(contact, farm, captured_at, lookup_cache=None, saved=None):
     """Reutiliza seleção de identidade e resolução oficiais, sem novos endpoints."""
     fields = get_fields(contact)
+    cadastro_status = cpf_cadastro_status(fields.get("cpf"))
+    if cadastro_status:
+        return {"status_confirmacao": cadastro_status}, []
     # Esta rotina não deve nem usar ultimo_pedido como localizador implícito.
     safe_contact = {
         **contact,
@@ -726,6 +833,11 @@ def propose(contact, order, items, structure, saved=None, *, now=None):
     )
     if blocked:
         plan["reason"] = blocked
+        if blocked.endswith("_WENI") and order and _sales_order_is_valid(order):
+            plan["warnings"].append(
+                "STATUS_WENI_DIVERGENTE_API: Weni registra cancelamento, mas a API "
+                "retornou venda válida. Bloqueio mantido; revisar na carga Weni."
+            )
         if in_group:
             plan["action"] = "remove"
         return plan
@@ -866,7 +978,29 @@ def propose(contact, order, items, structure, saved=None, *, now=None):
     if plan["action"] == "replace" and (entry.get("admitted") or entry.get("pending")):
         plan["action"] = "remove"
         plan["reason"] = "PEDIDO_JA_ADMITIDO_OU_INDETERMINADO"
+    _refresh_plan_deadline(plan, now)
     return plan
+
+
+def _refresh_plan_deadline(plan, now):
+    event_at = business_order_datetime(plan.get("event_at"))
+    plan["scheduled_future"] = bool(event_at and event_at > now.astimezone(TZ))
+    if plan["action"] in {"add", "replace"} and not plan["scheduled_future"]:
+        plan["action"] = "remove" if plan["in_group"] else ""
+        plan["reason"] = "HORARIO_D25_ENCERRADO"
+        plan["warnings"].append(
+            "Horário do evento D+25 encerrado; nenhuma nova inclusão será realizada."
+        )
+
+
+def finalize_review(review, now):
+    """Refresh deadlines after a long scan, before presenting the frozen review."""
+    ensure_review_current(review, now)
+    for plan in review["plans"]:
+        _refresh_plan_deadline(plan, now)
+        audit_plan(plan)
+    review["generated_at"] = now.isoformat()
+    return review
 
 
 def audit_plan(plan):
@@ -878,6 +1012,7 @@ def audit_plan(plan):
         raise RuntimeError("Ação de grupo inválida.")
     if plan["action"] in {"add", "replace"} and (
         not plan["within_window"]
+        or not plan.get("scheduled_future")
         or plan["reason"] != "JANELA_0_A_25"
         or not plan["purchase"]
     ):
@@ -913,6 +1048,7 @@ def audit_plan(plan):
 
 def make_review(plans, structure, *, now=None, state=None):
     now = now or now_local()
+    _validate_review_uuids(plans)
     for plan in plans:
         audit_plan(plan)
     return {
@@ -933,12 +1069,39 @@ def write_review(review, path=REVIEW):
     lines = [
         "NexoFlow 1.0 — Revisão de recompra D+25",
         f"Dia local: {review['day']}",
+        f"Dados capturados em: {review['created_at']}",
+        f"Horários conferidos ao concluir: {review.get('generated_at', review['created_at'])}",
         "Política: grupo entre 0 e 25 dias; envio somente D+25, bloqueando recusas e pedidos somente animais. Pedidos mistos exibem apenas produtos humanos; marketing_opt_in não será alterado.",
         "Sem disparos, sem alterações de campanha. Horário já passado não cria envio retroativo.",
         "Pendências: " + "; ".join(review["structure"]["errors"]),
         f"Resultados: {dict(counts)}",
     ]
+    lines.extend(public_review_lines(review))
+    if review.get("pagination"):
+        lines.append(f"Paginação consolidada: {review['pagination']}")
+    cadastro = [
+        {
+            "contact_uuid": plan["contact_uuid"],
+            "motivo": plan.get("order_resolution_status") or plan["reason"],
+            "cpf_original": plan["guard"]["fields"].get("cpf", ""),
+        }
+        for plan in review["plans"]
+        if (plan.get("order_resolution_status") or plan["reason"])
+        in {"CPF_INVALIDO_CADASTRO", "CPF_NAO_INFORMADO"}
+    ]
+    private = path.parent / "privado"
+    private.mkdir(parents=True, exist_ok=True, mode=0o700)
+    cadastro_path = private / f"{path.stem}_cadastro_pendente.json"
+    atomic_json(cadastro_path, {"review_sha256": digest(review), "contatos": cadastro})
+    lines.append(
+        f"Cadastros a corrigir: {len(cadastro)}; detalhes privados em {cadastro_path.name} na pasta privado."
+    )
+    lines.append(
+        "Detalhes abaixo: alterações e avisos. O JSON privado contém a revisão completa; não compartilhe os arquivos com dados de clientes."
+    )
     for plan in review["plans"]:
+        if not (plan["action"] or plan["fields"] or plan.get("warnings")):
+            continue
         lines.append(
             f"Contato {plan['contact_uuid']} | pedido {plan['order_id']} | {plan['reason']} | grupo={plan['action'] or 'sem mudança'} | evento={plan['event_at']} | horário futuro={plan['scheduled_future']} | avisos={plan.get('warnings', [])}"
         )
@@ -959,9 +1122,21 @@ def read_review(path):
         or review.get("policy") != PRODUCT_POLICY
     ):
         raise RuntimeError("Revisão inválida ou alterada. Nenhuma aplicação iniciada.")
+    _validate_review_uuids(review["plans"])
     for plan in review["plans"]:
         audit_plan(plan)
     return review
+
+
+def _validate_review_uuids(plans):
+    seen = set()
+    for plan in plans:
+        uid = plan.get("contact_uuid")
+        if not uid or uid in seen:
+            raise RuntimeError(
+                "Revisão contém UUID ausente ou duplicado. Gere uma nova revisão consolidada."
+            )
+        seen.add(uid)
 
 
 def append_audit(event, path=AUDIT):
@@ -1070,8 +1245,9 @@ def apply_review(
     """Somente snapshots revisados; conflito ou confirmação incerta bloqueia inclusão."""
     if review.get("policy") != PRODUCT_POLICY:
         raise RuntimeError(
-            "Revisão anterior ao filtro de produtos animais. Gere um novo dry-run e revise antes de aplicar."
+            "Revisão anterior à política atual. Gere um novo dry-run e revise antes de aplicar."
         )
+    _validate_review_uuids(review["plans"])
     now = now_fn()
     ensure_review_current(review, now)
     structure = inspect_structure(weni)
@@ -1124,9 +1300,12 @@ def apply_review(
                     {"contact_uuid": uid, "status": "CONFLITO_CONTATO"}, audit_path
                 )
                 continue
-            order, items = _resolve_checked_contact(
-                current, reads, now_fn().isoformat(), saved
-            )
+            if refused(current) or member(current, structure["opt_out_uuid"], OPT_OUT):
+                order, items = None, []
+            else:
+                order, items = _resolve_checked_contact(
+                    current, reads, now_fn().isoformat(), saved
+                )
             check_day()
             fresh = propose(current, order, items, structure, saved, now=now_fn())
             check_day()
@@ -1141,6 +1320,7 @@ def apply_review(
                     "event_at",
                     "due_today",
                     "within_window",
+                    "scheduled_future",
                 )
             ) or any(
                 fresh.get(key) != reviewed.get(key)
@@ -1285,6 +1465,11 @@ def apply_review(
                         raise RuntimeError(
                             "Janela de 0 a 25 dias terminou durante a aplicação."
                         )
+                    event_at = business_order_datetime(fresh["event_at"])
+                    if event_at is None or event_at <= now_fn().astimezone(TZ):
+                        raise PreAdmissionConflict(
+                            "HORARIO_D25_ENCERRADO: horário do evento passou antes da inclusão."
+                        )
                     check_day()
                     writes_started = True
                     stage = "adicionar_grupo"
@@ -1397,11 +1582,14 @@ def apply_review(
             except Exception as exc:
                 frames = safe_error_frames(exc)
                 logging.error(
-                    "Recompra falhou: contato=%s; pedido=%s; etapa=%s; tipo=%s; origem=%s.",
+                    "Recompra falhou: contato=%s; pedido=%s; etapa=%s; tipo=%s; "
+                    "errno=%s; winerror=%s; origem=%s.",
                     uid,
                     fresh["order_id"],
                     stage,
                     type(exc).__name__,
+                    getattr(exc, "errno", None),
+                    getattr(exc, "winerror", None),
                     " > ".join(frames),
                 )
                 if contact_state != persisted_state:

@@ -5,6 +5,8 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import Mock
+from xml.etree import ElementTree
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import openpyxl
 
@@ -61,7 +63,7 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
                 "Cliente Árvore",
                 "5591987654321",
                 "",
-                "0",
+                "123",
                 "arvore@example.test",
                 "Cliente Árvore",
                 "Produto",
@@ -105,12 +107,17 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
         tickets, contacts, report = self.read()
         self.assertEqual(tickets[0]["contact_uuid"], contact()["uuid"])
         self.assertEqual(tickets[0]["chat_contact_uuid"], CHAT)
-        self.assertEqual(contacts[0]["fields"]["cpf"], "0")
+        self.assertEqual(contacts[0]["fields"]["cpf"], "123")
         self.assertEqual(contacts[0]["fields"]["email"], "arvore@example.test")
         self.assertEqual(contacts[0]["fields"]["pedido_produtos"], "Produto")
         self.assertEqual(report["summary"]["clientes_vinculados"], 1)
         self.assertEqual(tickets[0]["custom_fields"], {})
         self.assertEqual(len(report["sources"][0]["sha256"]), 64)
+
+    def test_placeholder_cpf_remains_original_for_cadastro_correction(self):
+        self.contact_rows[0][4] = "0"
+        _, contacts, _ = self.read()
+        self.assertEqual(contacts[0]["fields"]["cpf"], "0")
 
     def test_deleted_order_tag_imports_only_exact_legacy_alias(self):
         for tag, expected in [
@@ -138,7 +145,7 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
                 "Cliente Árvore",
                 "5591987654321",
                 "",
-                "0",
+                "123",
                 "arvore@example.test",
                 "",
                 "",
@@ -149,7 +156,7 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
         self.assertEqual(report["summary"]["URN_AMBIGUA"], 1)
 
     def test_display_names_do_not_block_technical_link_for_valid_or_invalid_cpf(self):
-        for cpf in ("52998224725", "0"):
+        for cpf in ("52998224725", "123"):
             for display_name in ("🌻", "Outra Pessoa"):
                 with self.subTest(cpf=cpf, display_name=display_name):
                     self.contact_rows[0][4] = cpf
@@ -181,7 +188,7 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
         tickets, _, _ = self.read()
         current = contact(
             name="🌻",
-            fields={"cpf": "0", "nome": "Outra Pessoa"},
+            fields={"cpf": "123", "nome": "Outra Pessoa"},
             urns=[URN],
         )
         accepted, contacts, rejected = validate_current_contacts(tickets, [current])
@@ -243,7 +250,7 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
 
     def test_duplicate_uuid_different_data_and_formulas_fail_closed(self):
         self.contact_rows.append(
-            [contact()["uuid"], "Outra Pessoa", "", "", "0", "", "", ""]
+            [contact()["uuid"], "Outra Pessoa", "", "", "123", "", "", ""]
         )
         with self.assertRaises(DeliverySpreadsheetError):
             self.read()
@@ -251,6 +258,74 @@ class DeliverySpreadsheetsTests(unittest.TestCase):
         self.contact_rows[0][5] = "=1+1"
         with self.assertRaises(DeliverySpreadsheetError):
             self.read()
+
+    def test_original_export_boolean_formulas_preserve_activity_filter(self):
+        for formula, expected in [("=FALSE()", 1), ("=TRUE()", 0)]:
+            with self.subTest(formula=formula):
+                self.room_rows[0][5] = formula
+                tickets, _, _ = self.read()
+                self.assertEqual(len(tickets), expected)
+
+    def test_export_boolean_formula_uses_constant_not_cached_value(self):
+        namespace = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        for formula, cache, expected in [("=FALSE()", "1", 1), ("=TRUE()", "123", 0)]:
+            with self.subTest(formula=formula):
+                self.room_rows[0][5] = formula
+                self.exports()
+                path = self.directory / CONVERSATIONS_FILENAME
+                with ZipFile(path) as archive:
+                    entries = {name: archive.read(name) for name in archive.namelist()}
+                document = ElementTree.fromstring(entries["xl/worksheets/sheet1.xml"])
+                cell = document.find(f".//{namespace}c[@r='F2']")
+                self.assertIsNotNone(cell)
+                cell.set("t", "b")
+                cell.find(f"{namespace}v").text = cache
+                entries["xl/worksheets/sheet1.xml"] = ElementTree.tostring(document)
+                with ZipFile(path, "w", compression=ZIP_DEFLATED) as archive:
+                    for name, content in entries.items():
+                        archive.writestr(name, content)
+                tickets, _, _ = read_delivery_spreadsheets(
+                    self.directory, cutoff=datetime.fromisoformat(NOW)
+                )
+                self.assertEqual(len(tickets), expected)
+
+    def test_other_activity_formulas_are_never_evaluated(self):
+        for formula in (
+            "=1=0",
+            "=IF(TRUE(),FALSE(),TRUE())",
+            '=FALSE()+WEBSERVICE("https://example.test")',
+            "='[external.xlsx]Sheet1'!A1",
+        ):
+            with self.subTest(formula=formula):
+                self.room_rows[0][5] = formula
+                with self.assertRaises(DeliverySpreadsheetError):
+                    self.read()
+
+    def test_boolean_formulas_are_rejected_outside_activity_column(self):
+        for index in range(len(self.room_rows[0])):
+            if index == 5:
+                continue
+            with self.subTest(index=index):
+                original = self.room_rows[0][index]
+                self.room_rows[0][index] = "=FALSE()"
+                with self.assertRaises(DeliverySpreadsheetError):
+                    self.read()
+                self.room_rows[0][index] = original
+        self.contact_rows[0][1] = "=TRUE()"
+        with self.assertRaises(DeliverySpreadsheetError):
+            self.read()
+
+    def test_formula_in_export_header_is_rejected(self):
+        self.exports()
+        path = self.directory / CONTACTS_FILENAME
+        book = openpyxl.load_workbook(path)
+        book.active.cell(1, len(HEADERS) + 1, "=FALSE()")
+        book.save(path)
+        book.close()
+        with self.assertRaises(DeliverySpreadsheetError):
+            read_delivery_spreadsheets(
+                self.directory, cutoff=datetime.fromisoformat(NOW)
+            )
 
     def test_wrong_sheet_and_missing_file_fail_without_network(self):
         with self.assertRaises(DeliverySpreadsheetError):

@@ -209,7 +209,7 @@ class RecompraReadCacheTests(unittest.TestCase):
         for index, name in enumerate(
             ("Ana Cliente Sintética", "Bia Cliente Sintética"), start=1
         ):
-            contact = synthetic_contact(index, "0")
+            contact = synthetic_contact(index, "123")
             contact["name"] = name
             contact["urns"] = []
             contact["fields"]["email"] = f"cliente{index}@example.test"
@@ -218,7 +218,7 @@ class RecompraReadCacheTests(unittest.TestCase):
                 {
                     "cliente": {
                         "id": index,
-                        "cpf": "0",
+                        "cpf": "123",
                         "nome": name,
                         "email": f"cliente{index}@example.test",
                     },
@@ -247,7 +247,7 @@ class RecompraReadCacheTests(unittest.TestCase):
         self.assertEqual(rejected["status_confirmacao"], "CPF_IDENTIDADE_DIVERGENTE")
         self.assertEqual(items, [])
         self.assertEqual(resolver.call_count, 2)
-        farm.get_cliente_by_cpf.assert_called_once_with("0")
+        farm.get_cliente_by_cpf.assert_called_once_with("123")
 
 
 class RecompraPlanBuildTests(unittest.TestCase):
@@ -360,24 +360,20 @@ class RecompraPlanBuildTests(unittest.TestCase):
             [0, 0, 0, 1, 1, 1, 2],
         )
 
-    def test_processing_starts_before_source_iterator_finishes(self):
-        processing = Event()
+    def test_source_is_consolidated_before_any_contact_queries_begin(self):
         source_finished = Event()
 
         def source():
             for index in range(8):
                 yield synthetic_contact(index)
-            self.assertTrue(
-                processing.wait(TIMEOUT),
-                "A fonte foi consumida inteira antes de iniciar consultas.",
-            )
             yield synthetic_contact(8)
             source_finished.set()
 
         def resolve(*args, **kwargs):
-            if not processing.is_set():
-                self.assertFalse(source_finished.is_set())
-                processing.set()
+            self.assertTrue(
+                source_finished.is_set(),
+                "Consulta iniciada antes de descartar UUIDs divergentes em páginas posteriores.",
+            )
             return None, []
 
         with patch("recompra.resolve_latest", side_effect=resolve):
@@ -691,6 +687,7 @@ class RecompraRunnerOptimizationTests(unittest.TestCase):
                     patch("recompra.make_review", return_value=review)
                 )
                 writer = stack.enter_context(patch("recompra.write_review"))
+                finalizer = stack.enter_context(patch("recompra.finalize_review"))
                 stack.enter_context(patch("builtins.print"))
                 review_out = Path("synthetic/review.json")
                 self.assertEqual(
@@ -700,12 +697,19 @@ class RecompraRunnerOptimizationTests(unittest.TestCase):
                     0,
                 )
                 planner.assert_called_once_with(
-                    contacts, farm, STRUCTURE, state, now=NOW, workers=workers
+                    contacts,
+                    farm,
+                    STRUCTURE,
+                    state,
+                    now=NOW,
+                    workers=workers,
+                    pagination_stats={},
                 )
                 reviewer.assert_called_once_with(
                     [plan], STRUCTURE, now=NOW, state=state
                 )
                 writer.assert_called_once_with(review, review_out)
+                finalizer.assert_called_once_with(review, NOW)
                 weni.iter_contacts.assert_called_once_with()
                 weni.list_contacts.assert_not_called()
                 weni.close.assert_called_once_with()

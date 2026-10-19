@@ -3,6 +3,7 @@
 import json
 import unittest
 from copy import deepcopy
+from unittest.mock import patch
 
 from pet_catalog import CATALOG_SOURCE_ROWS, catalog_contains
 from pharmacy_scope import filter_pharmacy_order, sanitize_contact_order
@@ -51,6 +52,57 @@ class PetCatalogTests(unittest.TestCase):
         for name in ("ACNASE CREME", "SINUSTRAT", "Frasco PET 300ml", "Paracetamol"):
             self.assertFalse(is_animal_product({"nome": name}))
         self.assertEqual(CATALOG_SOURCE_ROWS, 8769)
+
+    def test_veterinary_brands_in_abbreviated_names_are_excluded(self):
+        for name in (
+            "MACROGARD PASTA 60G",
+            "MACROGARD SAMLL SIZE C/30 CPR",
+            "MacroGard Pet Small Size 30 comprimidos",
+            "BECORDIL 5MG C/30 CPR",
+        ):
+            with self.subTest(name=name):
+                self.assertTrue(is_animal_product({"produto_nome": name}))
+                current, order, items = fixture(24, grouped=True)
+                items[0]["produto_nome"] = name
+                plan = propose(current, order, items, STRUCTURE, now=NOW)
+                self.assertEqual(plan["reason"], "PEDIDO_SOMENTE_PRODUTOS_ANIMAIS")
+                self.assertEqual(plan["action"], "remove")
+
+    def test_character_bandage_is_human_without_overriding_pet_evidence(self):
+        name = "CURATIVO TOPZ PATRULHA CANINA C/25"
+        self.assertFalse(is_animal_product({"nome": name}))
+        self.assertFalse(
+            is_animal_product(
+                {"nome": "Curativo Topz Baby Patrulha Canina 10 unidades"}
+            )
+        )
+        for item in (
+            {"nome": name, "categoria": "Veterinário"},
+            {"nome": name, "produto_codigo": "32909403"},
+            {"nome": name + " uso animal"},
+            {"nome": "Coleira Patrulha Canina"},
+        ):
+            self.assertTrue(is_animal_product(item))
+        with patch("product_scope.catalog_contains", return_value=True):
+            self.assertTrue(is_animal_product({"nome": name}))
+
+    def test_mixed_order_removes_veterinary_brand_preserving_human_bandage_value(self):
+        order, items, _ = scope_fixture()
+        items[0]["produto_nome"] = "CURATIVO TOPZ PATRULHA CANINA C/25"
+        items[1]["produto_nome"] = "MACROGARD PASTA 60G"
+        filtered, retained = filter_pharmacy_order(order, items)
+        self.assertEqual(retained, [items[0]])
+        self.assertEqual(filtered["valor_total_faturamento"], "18.00")
+        self.assertEqual(filtered["farmalider_frete"], "0.00")
+        current, purchase, campaign_items = fixture(24)
+        campaign_items[0]["produto_nome"] = items[0]["produto_nome"]
+        campaign_items.append(
+            {**campaign_items[0], "produto_nome": items[1]["produto_nome"]}
+        )
+        plan = propose(current, purchase, campaign_items, STRUCTURE, now=NOW)
+        self.assertEqual(plan["action"], "add")
+        self.assertNotIn("MACROGARD", plan["fields"]["pedido_produtos"])
+        self.assertIn("PATRULHA CANINA", plan["fields"]["pedido_produtos"])
 
     def test_pet_order_by_code_is_excluded_and_personal_fields_preserved(self):
         order, items, contact = scope_fixture(pet_only=True)

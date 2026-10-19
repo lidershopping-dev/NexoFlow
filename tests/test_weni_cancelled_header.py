@@ -107,9 +107,9 @@ class WeniCancelledHeaderTests(unittest.TestCase):
                 self.assertEqual(plan.group_actions, [])
 
     def test_invalid_cpf_cancel_requires_matching_name_and_contact_identity(self):
-        self.contact["fields"].update(cpf="0", email="cliente@example.invalid")
+        self.contact["fields"].update(cpf="123", email="cliente@example.invalid")
         self.customer["cliente"].update(
-            cpf="0", nome="Cliente Sintético", email="cliente@example.invalid"
+            cpf="123", nome="Cliente Sintético", email="cliente@example.invalid"
         )
         self.pedido["capa"]["status"] = 3
         plan = self.build()

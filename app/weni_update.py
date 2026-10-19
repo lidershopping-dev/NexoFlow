@@ -39,6 +39,7 @@ from contact_enrichment import (
     FieldEvidence,
     infer_contact_fields,
     message_created_on,
+    message_direction,
     message_id,
 )
 from farmalider_client import (
@@ -221,6 +222,7 @@ class UpdateStats:
     invalid_cpf_orders_found: int = 0
     invalid_cpf_orders_validated: int = 0
     invalid_cpf_outcomes: dict[str, int] = field(default_factory=dict)
+    pending_retry_uuids: list[str] = field(default_factory=list)
 
 
 def _record_invalid_cpf_result(stats: UpdateStats, plan: ContactUpdatePlan) -> None:
@@ -1852,6 +1854,7 @@ def write_review_snapshot(
         "mode": "full" if full else "incremental",
         "plan_sha256": digest,
         "summary": summary,
+        "pending_retry_uuids": sorted(set(stats.pending_retry_uuids)),
         "plans": [
             {
                 "display": {
@@ -2521,6 +2524,19 @@ def check_update_connections() -> dict[str, Any]:
             farm.close()
 
 
+def _read_retry_contact(client, uuid: str, stats: UpdateStats):
+    try:
+        return client.get_contact(uuid=uuid)
+    except Exception as exc:
+        stats.contacts_failed += 1
+        stats.pending_retry_uuids.append(uuid)
+        logging.warning(
+            "Weni: reconsulta de contato pendente (%s); demais contatos continuarão.",
+            type(exc).__name__,
+        )
+        return None
+
+
 def run_update(
     *,
     apply: bool,
@@ -2528,6 +2544,8 @@ def run_update(
     review_out: Path | None = None,
     require_review: Path | None = None,
     quarter: int | None = None,
+    deduplicated_uuids: set[str] | None = None,
+    dedup_contacts: list[dict[str, Any]] | None = None,
 ) -> UpdateStats:
     token = str(getattr(secrets, "WENI_API_TOKEN", "")).strip()
     if not token or token == "COLE_SEU_TOKEN_WENI_AQUI":
@@ -2600,6 +2618,11 @@ def run_update(
                 opt_in_group_available=opt_in_available,
             )
 
+            # A rotina de deduplicação já confirmou a exclusão e a limpeza
+            # destes UUIDs. Não classificá-los como conflito nem recriá-los.
+            plans = [
+                p for p in plans if p.contact_uuid not in (deduplicated_uuids or set())
+            ]
             summary = review_payload.get("summary")
             if not isinstance(summary, dict):
                 summary = {}
@@ -2661,7 +2684,10 @@ def run_update(
                 "Novas mensagens/contatos ficam para a próxima incremental."
             )
 
-            conflicted_uuids: list[str] = []
+            conflicted_uuids: list[str] = list(
+                review_payload.get("pending_retry_uuids") or []
+            )
+            stats.contacts_failed = len(conflicted_uuids)
             with TaskProgress(
                 "Aplicação do snapshot",
                 len(plans),
@@ -2672,7 +2698,24 @@ def run_update(
                 for index, plan in progress.track(enumerate(plans, start=1)):
                     # Em atendimento 24h, relê somente este contato imediatamente
                     # antes da escrita. Mudanças em outros contatos não cancelam a carga.
-                    current_contact = weni.get_contact(uuid=plan.contact_uuid)
+                    try:
+                        current_contact = weni.get_contact(uuid=plan.contact_uuid)
+                    except Exception as exc:
+                        stats.contacts_failed += 1
+                        conflicted_uuids.append(plan.contact_uuid)
+                        _append_audit(
+                            _audit_plan_event(
+                                plan,
+                                mode="apply-frozen",
+                                status="failed",
+                                error=type(exc).__name__,
+                            )
+                        )
+                        logging.warning(
+                            "Weni: leitura de um contato pendente (%s); carga continuará.",
+                            type(exc).__name__,
+                        )
+                        continue
                     stats.contacts_modified += 1
                     if current_contact is None:
                         stats.contacts_conflicted += 1
@@ -2770,10 +2813,12 @@ def run_update(
                                 error=exc.__class__.__name__,
                             )
                         )
-                        raise RuntimeError(
-                            "Falha durante a gravação do snapshot congelado na Weni. "
-                            "O checkpoint não foi avançado."
-                        ) from exc
+                        conflicted_uuids.append(prepared.contact_uuid)
+                        logging.warning(
+                            "Weni: contato pendente após falha de gravação (%s); próxima incremental fará nova conferência.",
+                            type(exc).__name__,
+                        )
+                        continue
 
             if quarter is None:
                 state_payload = {
@@ -2782,7 +2827,7 @@ def run_update(
                     "review_sha256": digest,
                     "contacts_updated": stats.contacts_updated,
                     "contacts_conflicted": stats.contacts_conflicted,
-                    "pending_conflict_uuids": conflicted_uuids,
+                    "pending_conflict_uuids": sorted(set(conflicted_uuids)),
                     "open_order_uuids": sorted(open_order_uuids),
                     "contacts_already_satisfied": stats.contacts_already_satisfied,
                     "field_changes": stats.field_changes,
@@ -2877,6 +2922,11 @@ def run_update(
             # also queried again; message discovery still uses its checkpoint.
             modified_contacts = weni.list_contacts(after=None)
 
+        if dedup_contacts is not None:
+            dedup_contacts.extend(
+                all_contacts if quarter is not None else modified_contacts
+            )
+
         incoming_all = weni.list_messages(
             after=window.after,
             before=window.started_at,
@@ -2923,6 +2973,11 @@ def run_update(
         # explicitamente na próxima incremental, mesmo se a Weni não refletir
         # a mudança no modified_on do contato (por exemplo, só associação a grupo).
         pending_conflicts = state.get("pending_conflict_uuids") or []
+        pending_conflict_set = (
+            {str(uid).strip() for uid in pending_conflicts if str(uid).strip()}
+            if isinstance(pending_conflicts, list)
+            else set()
+        )
         if isinstance(pending_conflicts, list) and pending_conflicts:
             unique_pending = sorted(
                 {str(item).strip() for item in pending_conflicts if str(item).strip()}
@@ -2936,7 +2991,7 @@ def run_update(
                     continue
                 if pending_uuid in contacts_by_uuid:
                     continue
-                pending_contact = weni.get_contact(uuid=pending_uuid)
+                pending_contact = _read_retry_contact(weni, pending_uuid, stats)
                 if pending_contact is not None:
                     contacts_by_uuid[pending_uuid] = pending_contact
 
@@ -2980,7 +3035,7 @@ def run_update(
                     continue
                 if open_uuid in contacts_by_uuid:
                     continue
-                open_contact = weni.get_contact(uuid=open_uuid)
+                open_contact = _read_retry_contact(weni, open_uuid, stats)
                 if open_contact is None:
                     open_order_uuids.discard(open_uuid)
                     continue
@@ -3003,55 +3058,76 @@ def run_update(
             for _preparation_index, contact_uuid in progress.track(
                 enumerate(sorted(all_contact_uuids), start=1)
             ):
-                contact = contacts_by_uuid.get(contact_uuid)
-                if contact is None:
-                    contact = weni.get_contact(uuid=contact_uuid)
-                if contact is None:
-                    logging.warning(
-                        "Contato %s não foi localizado; ignorando.", contact_uuid
-                    )
+                if contact_uuid in stats.pending_retry_uuids:
                     continue
+                try:
+                    contact = contacts_by_uuid.get(contact_uuid)
+                    if contact is None:
+                        contact = weni.get_contact(uuid=contact_uuid)
+                    if contact is None:
+                        logging.warning(
+                            "Contato %s não foi localizado; ignorando.", contact_uuid
+                        )
+                        continue
 
-                candidate_messages = incoming_by_contact.get(contact_uuid, [])
-                candidate_ids = {
-                    message_id(item) for item in candidate_messages if message_id(item)
-                }
-                if window.full:
-                    context = full_context_by_contact.get(
-                        contact_uuid, candidate_messages
-                    )
-                else:
-                    context = _build_context_for_contact(
-                        weni,
-                        contact_uuid=contact_uuid,
-                        candidate_messages=candidate_messages,
-                        started_at=window.started_at,
-                        full=False,
-                    )
-                    if not context:
-                        context = candidate_messages
+                    candidate_messages = incoming_by_contact.get(contact_uuid, [])
+                    candidate_ids = {
+                        message_id(item)
+                        for item in candidate_messages
+                        if message_id(item)
+                    }
+                    if not window.full and contact_uuid in pending_conflict_set:
+                        context = weni.list_messages(
+                            contact=contact_uuid, before=window.started_at
+                        )
+                        candidate_ids = {
+                            message_id(item)
+                            for item in context
+                            if message_id(item) and message_direction(item) == "in"
+                        }
+                    elif window.full:
+                        context = full_context_by_contact.get(
+                            contact_uuid, candidate_messages
+                        )
+                    else:
+                        context = _build_context_for_contact(
+                            weni,
+                            contact_uuid=contact_uuid,
+                            candidate_messages=candidate_messages,
+                            started_at=window.started_at,
+                            full=False,
+                        )
+                        if not context:
+                            context = candidate_messages
 
-                # Determine priority from the effective CPF, including a valid CPF
-                # inferred from messages. Preparation performs no FarmaLíder GET.
-                evidences = infer_contact_fields(
-                    context,
-                    candidate_message_ids=candidate_ids,
-                    current_lgpd=get_fields(contact).get("opt_in_lgpd"),
-                )
-                effective_cpf = (
-                    evidences["cpf"].value
-                    if "cpf" in evidences
-                    else get_fields(contact).get("cpf")
-                )
-                prepared_contacts.append(
-                    (
-                        cpf_query_priority(effective_cpf),
-                        contact_uuid,
-                        contact,
+                    # Determine priority from the effective CPF, including a valid CPF
+                    # inferred from messages. Preparation performs no FarmaLíder GET.
+                    evidences = infer_contact_fields(
                         context,
-                        candidate_ids,
+                        candidate_message_ids=candidate_ids,
+                        current_lgpd=get_fields(contact).get("opt_in_lgpd"),
                     )
-                )
+                    effective_cpf = (
+                        evidences["cpf"].value
+                        if "cpf" in evidences
+                        else get_fields(contact).get("cpf")
+                    )
+                    prepared_contacts.append(
+                        (
+                            cpf_query_priority(effective_cpf),
+                            contact_uuid,
+                            contact,
+                            context,
+                            candidate_ids,
+                        )
+                    )
+                except Exception as exc:
+                    stats.contacts_failed += 1
+                    stats.pending_retry_uuids.append(contact_uuid)
+                    logging.warning(
+                        "Weni: preparação de um contato pendente (%s); demais contatos serão processados.",
+                        type(exc).__name__,
+                    )
 
         previous_phase = None
         invalid_batch = _InvalidCpfBatch()
@@ -3099,6 +3175,14 @@ def run_update(
                             contact_uuid
                         ),
                     )
+                except Exception as exc:
+                    stats.contacts_failed += 1
+                    stats.pending_retry_uuids.append(contact_uuid)
+                    logging.warning(
+                        "Weni: preparação de um contato pendente (%s); nova tentativa na próxima incremental.",
+                        type(exc).__name__,
+                    )
+                    continue
                 except BaseException:
                     invalid_batch.flush(interrupted=True)
                     raise
@@ -3221,7 +3305,7 @@ def run_update(
             logging.info("DRY-RUN concluído. Nenhum contato foi alterado na Weni.")
             return stats
 
-        conflicted_uuids: list[str] = []
+        conflicted_uuids: list[str] = list(stats.pending_retry_uuids)
         with TaskProgress(
             "Aplicação Weni",
             len(plans),
@@ -3286,11 +3370,12 @@ def run_update(
                             error=exc.__class__.__name__,
                         )
                     )
-                    # Não avança checkpoint. A próxima execução reprocessará a janela
-                    # e corrigirá com segurança o que já tiver sido gravado.
-                    raise RuntimeError(
-                        "Falha durante a gravação na Weni. O checkpoint não foi avançado."
-                    ) from exc
+                    conflicted_uuids.append(plan.contact_uuid)
+                    logging.warning(
+                        "Weni: contato pendente após falha de gravação (%s); carga continuará e a próxima incremental fará nova conferência.",
+                        type(exc).__name__,
+                    )
+                    continue
 
         _save_state(
             {
@@ -3298,7 +3383,7 @@ def run_update(
                 "last_mode": "full" if full else "incremental",
                 "contacts_updated": stats.contacts_updated,
                 "contacts_conflicted": stats.contacts_conflicted,
-                "pending_conflict_uuids": conflicted_uuids,
+                "pending_conflict_uuids": sorted(set(conflicted_uuids)),
                 "open_order_uuids": sorted(open_order_uuids),
                 "field_changes": stats.field_changes,
                 "group_actions": stats.group_actions,

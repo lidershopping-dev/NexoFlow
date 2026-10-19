@@ -91,14 +91,13 @@ class CpfQueryPriorityTests(unittest.TestCase):
             )
         self.assertFalse(farm.invalid_started_early)
         self.assertEqual(set(farm.calls[:2]), {VALID, OTHER_VALID})
-        self.assertCountEqual(farm.calls[2:], ["00000000000", "123", "0"])
-        self.assertEqual(stats.unique_queries, 5)
+        self.assertCountEqual(farm.calls[2:], ["123"])
+        self.assertEqual(stats.unique_queries, 3)
         self.assertEqual(stats.invalid, 4)
-        self.assertEqual(stats.confirmed, 7)
+        self.assertEqual(stats.invalid_registration, 2)
+        self.assertEqual(stats.confirmed, 5)
         self.assertEqual(rows[0]["cpf"], "00000000000")
-        self.assertEqual(
-            rows[0]["farmalider_cliente_status"], "CPF_INVALIDO_ENCONTRADO"
-        )
+        self.assertEqual(rows[0]["farmalider_cliente_status"], "CPF_INVALIDO_CADASTRO")
         self.assertEqual(rows[-1]["farmalider_cliente_status"], "CPF_NAO_INFORMADO")
 
     def test_invalid_lookup_status_is_distinct_from_mathematical_validity(self):
@@ -151,7 +150,7 @@ class CpfQueryPriorityTests(unittest.TestCase):
             max_response_ms=1,
             effective_delay_ms=0,
         )
-        rows = [{"cpf": cpf} for cpf in ["0", "1", "2"]]
+        rows = [{"cpf": cpf} for cpf in ["123", "124", "125"]]
         with patch("main.FARMALIDER_MAX_WORKERS", 1):
             stats = validate_contacts(
                 rows,
@@ -165,7 +164,7 @@ class CpfQueryPriorityTests(unittest.TestCase):
         )
         self.assertEqual(stats.api_errors, 1)
 
-    def test_invalid_customer_order_can_be_validated_without_changing_cpf(self):
+    def test_placeholder_cpf_does_not_query_customer_or_reuse_order_locators(self):
         payload = {
             "cliente": {
                 "id": 99,
@@ -208,10 +207,11 @@ class CpfQueryPriorityTests(unittest.TestCase):
         order, items = resolve_contact_order(
             contact, farm_client=farm, captured_at="2026-10-08T10:00:00-03:00"
         )
-        self.assertEqual(order["status_validacao"], "OK")
-        self.assertEqual(order["pedido_id"], "123")
-        self.assertEqual(len(items), 1)
-        farm.get_cliente_by_cpf.assert_called_once_with("00000000000")
+        self.assertEqual(order["status_confirmacao"], "CPF_INVALIDO_CADASTRO")
+        self.assertEqual(order["pedido_id"], "")
+        self.assertEqual(items, [])
+        farm.get_cliente_by_cpf.assert_not_called()
+        farm.get_pedido.assert_not_called()
         self.assertEqual(contact["fields"]["cpf"], "00000000000")
         plan = weni_update._build_contact_plan(
             contact,
@@ -222,8 +222,8 @@ class CpfQueryPriorityTests(unittest.TestCase):
             opt_out_group_name="Opt-Out LGPD",
             opt_out_group_uuid="g1",
         )
-        self.assertTrue(plan.order_validated)
-        self.assertEqual(plan.fields["pedido_id"], "123")
+        self.assertFalse(plan.order_validated)
+        self.assertNotIn("pedido_id", plan.fields)
         self.assertNotIn("cpf", plan.fields)
         weni_update.audit_plans([plan], opt_out_group_available=True)
 
@@ -311,7 +311,10 @@ class CpfQueryPriorityTests(unittest.TestCase):
             result = weni_update.run_update(apply=False, full=True, review_out=review)
             self.assertEqual(result.invalid_cpf_checked, 2)
             self.assertEqual(result.invalid_cpf_orders_found, 0)
-            self.assertEqual(result.invalid_cpf_outcomes, {"CPF_NAO_ENCONTRADO": 2})
+            self.assertEqual(
+                result.invalid_cpf_outcomes,
+                {"CPF_INVALIDO_CADASTRO": 1, "CPF_NAO_ENCONTRADO": 1},
+            )
             payload = json.loads(review.read_text(encoding="utf-8"))
             self.assertEqual(payload["summary"]["invalid_cpf_checked"], 2)
             resumed = weni_update.run_update(
@@ -319,6 +322,6 @@ class CpfQueryPriorityTests(unittest.TestCase):
             )
             self.assertEqual(resumed.invalid_cpf_checked, 2)
             self.assertEqual(resumed.invalid_cpf_outcomes, result.invalid_cpf_outcomes)
-        self.assertEqual(calls, [VALID, "0", "123"])
+        self.assertEqual(calls, [VALID, "123"])
         client.update_contact_fields.assert_not_called()
         client.contact_group_action.assert_not_called()

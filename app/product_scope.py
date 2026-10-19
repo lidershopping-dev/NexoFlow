@@ -13,7 +13,7 @@ from typing import Any
 
 from pet_catalog import CATALOG_REVISION, catalog_contains
 
-PHARMACY_SCOPE_VERSION = f"human_products_v2_{CATALOG_REVISION}"
+PHARMACY_SCOPE_VERSION = f"human_products_v3_{CATALOG_REVISION}"
 
 
 def _normalized(value: Any) -> str:
@@ -34,7 +34,7 @@ _ANIMAL_TERMS = re.compile(
     r"bravecto|nexgard|simparic|credelio|drontal|milbemax|endogard|canex|"
     r"capstar|silmox|prediderm|petix|huspet|pipicat|frontline|"
     r"vetnil|biovet|organnact|nutrisana|cispet|alantol|periovet|promun|"
-    r"virbac|vibrac|cardalis)\b"
+    r"virbac|vibrac|cardalis|macrogard|becordil)\b"
 )
 _CATEGORY_TERMS = re.compile(r"\b(?:pets?|animais?|animal|vet|veterinari\w*)\b")
 _PET_PRODUCT = re.compile(
@@ -49,6 +49,11 @@ _PET_PRODUCT = re.compile(
 def is_animal_product(item: dict[str, Any]) -> bool:
     name = _normalized(item.get("produto_nome") or item.get("nome"))
     category = _normalized(item.get("categoria"))
+    # Topz's human bandages feature Paw Patrol characters. Remove only the
+    # character name from the textual species check, never override the pet
+    # catalog, a veterinary category or other animal evidence in the item.
+    if re.search(r"\bcurativos?\s+topz\b", name):
+        name = re.sub(r"\bpatrulha\s+canina\b", "", name)
     return bool(
         catalog_contains(item)
         or _ANIMAL_TERMS.search(name)

@@ -20,6 +20,33 @@ def _text(value: Any) -> str:
     return "" if value is None else str(value).strip()
 
 
+def cpf_cadastro_status(value: Any) -> str:
+    """Separate absent/placeholding data from an official API rejection.
+
+    A populated, nonzero CPF with invalid check digits can still identify an
+    official customer when the existing name/phone guard confirms that person.
+    Only values that cannot be used as a CPF locator are rejected locally.
+    """
+    from analytics import normalize_cpf, normalize_value
+
+    while isinstance(value, dict) and "value" in value:
+        value = value["value"]
+    raw = normalize_value(value).strip()
+    if not raw:
+        return "CPF_NAO_INFORMADO"
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, str))
+        or not raw.isascii()
+        or any(char not in "0123456789.- \t\r\n" for char in raw)
+    ):
+        return "CPF_INVALIDO_CADASTRO"
+    cpf = normalize_cpf(value)
+    if not cpf or len(cpf) > 11 or not cpf.strip("0"):
+        return "CPF_INVALIDO_CADASTRO"
+    return ""
+
+
 def _positive_id(value: Any) -> str:
     """API identities are positive integers, not booleans or decimal numbers."""
     if isinstance(value, bool) or not isinstance(value, (int, str)):
@@ -805,6 +832,14 @@ def resolve_contact_order(
 
     if farm_client is None:
         return None, []
+
+    if cpf_cadastro_status(fields.get("cpf")) == "CPF_INVALIDO_CADASTRO":
+        return _failure(
+            _empty_order(contact, captured_at),
+            [],
+            "CPF_INVALIDO_CADASTRO",
+            "CPF de cadastro inválido (zero ou formato não utilizável); nenhuma consulta enviada à API.",
+        )
 
     def fetch_pedido(order_id: str) -> dict[str, Any] | list[dict[str, Any]] | None:
         if not order_id:

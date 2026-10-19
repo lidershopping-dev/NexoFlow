@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
 import os
 import re
+import tempfile
 from collections import Counter
 from copy import deepcopy
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from uuid import NAMESPACE_URL, UUID, uuid5
 
 from analytics import (
@@ -26,11 +29,13 @@ from farmalider_client import (
 )
 from farmalider_integration import (
     apply_pedido_api_confirmation,
+    cpf_cadastro_status,
     resolve_contact_order,
     weni_identity_guard,
 )
 from pedido_utils import business_order_datetime, effective_order_status_code
 from product_scope import PHARMACY_SCOPE_VERSION
+from urn_utils import native_contact_urns
 from weni_client import WeniError
 from weni_update import (
     ContactUpdatePlan,
@@ -43,6 +48,8 @@ from weni_update import (
     _execute_contact_plan,
     _prepare_frozen_plan_for_apply,
     _recompra_products_need_unscheduling,
+    _same_guard_value,
+    _same_value,
     audit_plans,
     load_review_snapshot,
     write_review_snapshot,
@@ -306,6 +313,14 @@ def reconcile_tickets(
             raise
         except FarmaliderError:
             resolved = ({"status_confirmacao": "ERRO_API"}, [])
+        if (
+            resolved[0] is None
+            and cpf_cadastro_status(get_fields(contact).get("cpf"))
+            == "CPF_NAO_INFORMADO"
+        ):
+            # Sem localizador cadastral não significa que o cliente nunca comprou.
+            # Preserve a consulta legada por ID quando ela já confirmou um pedido.
+            resolved = ({"status_confirmacao": "CPF_NAO_INFORMADO"}, [])
         resolved_by_uuid[contact["uuid"]] = resolved
         plan = _order_plan(contact, resolved, farm, captured_at, available_fields)
         # Include unchanged/blocked contacts so their identity is checked again before publishing evidence.
@@ -509,6 +524,155 @@ def _digest(value):
     ).hexdigest()
 
 
+class _DeliveryConflictReport:
+    """Diagnóstico privado, sem copiar dados pessoais ou textos de produtos."""
+
+    def __init__(self, review_path, payload):
+        review_path = Path(review_path)
+        self.path = (
+            review_path.parent / "privado" / f"{review_path.stem}_conflitos.json"
+        )
+        if self.path.exists():
+            # Uma retomada não deve apagar a evidência da tentativa anterior.
+            history = self.path.parent / "historico_conflitos"
+            history.mkdir(parents=True, exist_ok=True, mode=0o700)
+            descriptor, archived = tempfile.mkstemp(
+                dir=history, prefix=f"{review_path.stem}_", suffix=".json"
+            )
+            try:
+                with os.fdopen(descriptor, "wb") as stream:
+                    stream.write(self.path.read_bytes())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+            except BaseException:
+                Path(archived).unlink(missing_ok=True)
+                raise
+        self.salt = os.urandom(32)
+        self.records = []
+        self.payload = {
+            "snapshot_sha256": payload.get("plan_sha256", ""),
+            "delivery_sha256": payload.get("delivery_sha256", ""),
+            "gerado_em": datetime.now(UTC).isoformat(),
+            "valores_ocultos": True,
+            "orientacao": (
+                "Compare as assinaturas dos valores esperados e encontrados. "
+                "Confira o UUID na Weni antes de retomar o mesmo snapshot; "
+                "não sobrescreva alterações posteriores."
+            ),
+            "conflitos": self.records,
+            "avaliacao_contatos_concluida": False,
+            "aplicacao_concluida": False,
+            "contatos_aceitos": 0,
+        }
+        self.save()
+
+    def _value(self, value):
+        serialized = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, default=str
+        ).encode("utf-8")
+        return {
+            "presente": value is not None,
+            "tipo": type(value).__name__,
+            "assinatura": hmac.new(self.salt, serialized, hashlib.sha256).hexdigest()[
+                :20
+            ],
+        }
+
+    def add(self, plan, reason, differences):
+        fields = sorted({difference[0] for difference in differences})
+        reference = hashlib.sha256(plan.contact_uuid.encode()).hexdigest()[:12]
+        self.records.append(
+            {
+                "contact_uuid": plan.contact_uuid,
+                "contato_ref": reference,
+                "motivo": reason,
+                "campos": fields,
+                "comparacoes": [
+                    {
+                        "campo": field,
+                        "esperado": self._value(expected),
+                        "encontrado": self._value(current),
+                    }
+                    for field, expected, current in differences
+                ],
+            }
+        )
+        self.save()
+        logging.warning(
+            "Delivery conflito: contato_ref=%s; motivo=%s; campos=%s. "
+            "Confira o relatório privado de conflitos.",
+            reference,
+            reason,
+            ", ".join(fields),
+        )
+
+    def save(self, *, completed=False, accepted=None, application_completed=False):
+        self.payload["avaliacao_contatos_concluida"] = completed
+        self.payload["aplicacao_concluida"] = application_completed
+        if accepted is not None:
+            self.payload["contatos_aceitos"] = accepted
+        self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor, temporary = tempfile.mkstemp(
+            dir=self.path.parent, prefix=".delivery-", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+                json.dump(self.payload, stream, ensure_ascii=False, indent=2)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+
+    def summary(self):
+        return {
+            "conflict_report": str(self.path),
+            "conflict_reasons": dict(Counter(row["motivo"] for row in self.records)),
+        }
+
+
+def _delivery_conflict_differences(plan, current):
+    """Reproduce apenas comparações, sem divulgar o texto bruto do guard."""
+    fields = get_fields(current)
+    differences = []
+    reasons = set()
+    for name, proposed in plan.fields.items():
+        found, expected = fields.get(name), plan.previous.get(name)
+        if not _same_value(name, found, proposed) and not _same_value(
+            name, found, expected
+        ):
+            differences.append((name, expected, found))
+            reasons.add("CAMPO_ALTERADO")
+    for name, expected in plan.guards.items():
+        if name in {"__pending_purchase_check", "__pending_purchase_check_resolved"}:
+            continue
+        if name == "__invalid_cpf_identity":
+            found = weni_identity_guard(current)
+            if found != expected:
+                differences.append((name, expected, found))
+                reasons.add("IDENTIDADE_ALTERADA")
+        elif name == "__native_urns":
+            found = sorted(native_contact_urns(current))
+            expected = sorted(
+                str(value) for value in (expected or []) if str(value).strip()
+            )
+            if found != expected:
+                differences.append((name, expected, found))
+                reasons.add("URN_NATIVA_ALTERADA")
+        elif name not in plan.fields:
+            found = fields.get(name)
+            if not _same_guard_value(found, expected):
+                differences.append((name, expected, found))
+                reasons.add("FONTE_ALTERADA")
+    if not differences:
+        # A proteção do grupo pode bloquear antes das comparações dos campos.
+        differences.append(
+            ("__grupos_recompra", plan.group_actions, current.get("groups"))
+        )
+        reasons.add("GRUPO_RECOMPRA_ALTERADO")
+    return "+".join(sorted(reasons)), differences
+
+
 def apply_delivery_review(path, weni, *, store_factory=None, target=None):
     plans, payload, _ = load_review_snapshot(full=True, json_path=path)
     delivery = payload.get("delivery")
@@ -554,7 +718,11 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
             + ", ".join(unknown)
             + ". Aplicação bloqueada antes de gravar; confira os campos e a revisão."
         )
+    conflict_report = _DeliveryConflictReport(path, payload)
     accepted, conflicts, current_contacts = set(), set(), []
+    reviewed_order_contacts = {
+        order.get("contact_uuid") for order in delivery["orders"]
+    }
     for position, plan in enumerate(plans, 1):
         reference = hashlib.sha256(plan.contact_uuid.encode()).hexdigest()[:12]
         if position == 1 or position % 100 == 0:
@@ -568,13 +736,31 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
         try:
             current = weni.get_contact(uuid=plan.contact_uuid)
         except WeniError as exc:
+            conflict_report.save(accepted=len(accepted))
             raise WeniError(
                 f"Delivery etapa=RELER_CONTATO contato_ref={reference}: {exc}"
             ) from None
         if current is None:
             conflicts.add(plan.contact_uuid)
+            conflict_report.add(
+                plan, "CONTATO_NAO_ENCONTRADO", [("__contato", True, None)]
+            )
             continue
-        prepared, reason = _prepare_frozen_plan_for_apply(
+        if cpf_cadastro_status(
+            get_fields(current).get("cpf")
+        ) == "CPF_INVALIDO_CADASTRO" and (
+            plan.order_validated or plan.contact_uuid in reviewed_order_contacts
+        ):
+            # Snapshots antigos podem conter pedidos consultados por CPF zero.
+            # Preserve sua retomada para os demais contatos sem reaplicar esse vínculo.
+            conflicts.add(plan.contact_uuid)
+            conflict_report.add(
+                plan,
+                "CPF_INVALIDO_CADASTRO",
+                [("cpf", "CPF preenchido consultável", get_fields(current).get("cpf"))],
+            )
+            continue
+        prepared, _ = _prepare_frozen_plan_for_apply(
             plan,
             current,
             opt_in_group_name="",
@@ -584,6 +770,8 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
         )
         if prepared is None:
             conflicts.add(plan.contact_uuid)
+            reason, differences = _delivery_conflict_differences(plan, current)
+            conflict_report.add(plan, reason, differences)
             continue
         if target in {"weni", "both"}:
             reviewed_groups = {
@@ -599,6 +787,17 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
                 # An admission after the review may have scheduled an old event.
                 # Do not change its reference without reviewing its removal.
                 conflicts.add(plan.contact_uuid)
+                conflict_report.add(
+                    plan,
+                    "GRUPO_RECOMPRA_ALTERADO",
+                    [
+                        (
+                            "__grupos_recompra",
+                            sorted(reviewed_groups),
+                            current.get("groups"),
+                        )
+                    ],
+                )
                 continue
         audit_plans(
             [prepared], opt_out_group_available=True, opt_in_group_available=True
@@ -607,10 +806,12 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
             try:
                 _execute_contact_plan(weni, prepared)
             except WeniError as exc:
+                conflict_report.save(accepted=len(accepted))
                 raise WeniError(
                     f"Delivery etapa=GRAVAR_CAMPOS_OU_REMOVER_RECOMPRA contato_ref={reference}: {exc}"
                 ) from None
         accepted.add(plan.contact_uuid)
+        conflict_report.payload["contatos_aceitos"] = len(accepted)
         merged = deepcopy(current)
         merged["fields"] = {**get_fields(current), **prepared.fields}
         base_record = normalize_contact(merged, delivery["cutoff"])
@@ -652,6 +853,18 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
     ]
     keys = {order["pedido_chave"] for order in orders}
     items = [item for item in delivery["items"] if item["pedido_chave"] in keys]
+    conflict_report.save(
+        completed=True,
+        accepted=len(accepted),
+        application_completed=target == "weni" and not conflicts,
+    )
+    if conflicts:
+        logging.warning(
+            "Delivery: %s contato(s) preservado(s) por conflito; detalhes privados em %s. "
+            "Retome o mesmo snapshot após conferir o estado atual na Weni.",
+            len(conflicts),
+            conflict_report.path,
+        )
     if target == "weni":
         return {
             "contacts_accepted": len(accepted),
@@ -659,6 +872,7 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
             "tickets": len(tickets),
             "orders": len(keys),
             "target": target,
+            **conflict_report.summary(),
         }
     if store_factory is None:
         raise ValueError(
@@ -742,6 +956,9 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
     finally:
         store.close()
 
+    conflict_report.save(
+        completed=True, accepted=len(accepted), application_completed=not conflicts
+    )
     logging.info(
         "Delivery: contatos aceitos=%s; conflitos=%s; tickets enviados=%s; pedidos únicos enviados=%s.",
         len(accepted),
@@ -754,4 +971,5 @@ def apply_delivery_review(path, weni, *, store_factory=None, target=None):
         "conflicts": len(conflicts),
         "tickets": len(tickets),
         "orders": len(keys),
+        **conflict_report.summary(),
     }

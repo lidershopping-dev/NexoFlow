@@ -6,6 +6,8 @@ Nas cargas Weni e Analytics, o NexoFlow consulta primeiro os CPFs matematicament
 
 O Analytics deduplica os identificadores por execução e separa os lotes das duas etapas. As cargas Weni em partes seguem essa prioridade dentro da parte selecionada, preservando o manifesto e a revisão humana. Evidência válida de CPF em mensagens entra na primeira etapa quando for o valor efetivo do plano. Toda nova carga reconsulta os identificadores no escopo selecionado; respostas duplicadas só são compartilhadas dentro da mesma execução. CPFs válidos dispensam comparação de nome, telefone e e-mail. CPFs inválidos exigem nome ou telefone correspondente.
 
+Valores ausentes, inteiramente zerados ou malformados são pendências cadastrais (`CPF_NAO_INFORMADO`/`CPF_INVALIDO_CADASTRO`), sem consulta por CPF nem substituição do valor original. Identificadores não zerados com verificador inválido continuam sujeitos à validação por identidade.
+
 `CPF_CONFIRMADO` identifica um CPF matematicamente válido encontrado na API; `CPF_INVALIDO_ENCONTRADO` identifica um CPF inválido cujo cliente foi confirmado também pelo primeiro nome ou pelo número local do telefone. Ambos alimentam o total de clientes encontrados, mas somente CPFs matematicamente válidos entram em `cpfs_validos`. HTTP 400 registra `CPF_REJEITADO_API`, sem retry e sem contar como falha 500; HTTP 404 registra `CPF_NAO_ENCONTRADO`; falhas de servidor/rede registram `ERRO_API`, sem autorizar um vínculo de cliente por CPF inválido. Os logs públicos mostram etapas e contagens, sem CPF. O diagnóstico privado de falhas 5xx aceita também identificadores curtos e zeros.
 
 Para CPF inválido, a coincidência do CPF não confirma a pessoa. É obrigatório comparar **primeiro nome correspondente ou número local do telefone correspondente**. A comparação de nome usa somente o primeiro nome, desconsiderando acentos, maiúsculas e símbolos; sobrenomes não precisam coincidir. O e-mail não é obrigatório para essa validação. O telefone compara apenas o número local, ignorando o prefixo brasileiro +55 e o DDD, sem completar dígitos nem inserir o nono dígito. Números nativos da Weni têm precedência sobre campos antigos de telefone/WhatsApp.
@@ -229,7 +231,9 @@ logs\weni_update_audit.jsonl
 logs\weni_update_state.json
 ```
 
-O checkpoint só é gravado após todas as alterações terminarem com sucesso. Falhas deixam a janela pendente para reprocessamento. Valores iguais não são regravados.
+Falhas isoladas não cancelam a carga Weni. Os contatos concluídos permanecem aplicados; os demais ficam registrados para revalidação na próxima incremental, recuperando mensagens anteriores quando necessário. Valores iguais não são regravados.
+
+A deduplicação integra a revisão e a aplicação da Weni: identifica o contato correto pelo CPF oficial e telefone nativo único, verifica a propriedade dos pedidos e exclui somente duplicados comprovados. Pedidos reais e recusas são preservados, com limpeza das fontes do Sheets e do Looker. [Regras e retomada da deduplicação](deduplicacao_weni.md).
 
 ## BATs operacionais
 
@@ -368,6 +372,8 @@ Toda mudança relevante deve executar:
 Consulte também `README.md`, `docs/README INSTALACAO.md`, `docs/README WENI.md` e `CHANGELOG.md`.
 
 ## Recompra FarmaLíder D+25
+
+A revisão de Recompra consolida UUIDs repetidos antes das consultas e isola cadastros divergentes. O lock do sistema operacional impede aplicações simultâneas e conserva metadados para diagnóstico. O horário do evento é reconferido após a coleta e antes da inclusão; eventos vencidos não autorizam nova admissão. O TXT resume propostas e avisos, enquanto os planos completos e cadastros pendentes ficam nos arquivos privados.
 
 `NexoFlow Recompra.exe` inicia `comandos/atualizar_recompra.bat`, com diagnóstico, dry-run, revisão humana e aplicação. Grupo sincronizado com a última compra confirmada entre 0 e 25 dias, remoção depois de 25 dias e por recusa. O envio continua somente no D+25 pela campanha Weni. Execute `nexo weni recompra auditoria`, `dry-run` e `aplicar` com revisão, ou `nexo weni recompra atualizar`. Confira [implementação, configuração e limites da recompra](README%20RECOMPRA.md). A rotina não altera marketing_opt_in, não dispara WhatsApp e não modifica a campanha.
 

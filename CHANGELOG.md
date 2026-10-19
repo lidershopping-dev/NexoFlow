@@ -1,5 +1,24 @@
 # NexoFlow 1.0 — Changelog
 
+- Delivery/Planilhas: conflitos passam a registrar referência anônima, motivo e campos no log, com UUID e comparação protegida em relatório privado; retomada explícita do snapshot preserva gravações concluídas e revisões anteriores. Carga parcial gera aviso, mantendo a revisão necessária antes das próximas etapas.
+
+- Recompra: bloqueio entre processos mantido pelo sistema operacional, com PID/início/identificação da execução, liberação segura e recuperação conservadora de execuções encerradas. O arquivo de lock permanece no disco; não precisa ser apagado para iniciar a rotina atualizada.
+- Recompra: consolidação por UUID antes das consultas, isolamento de cadastros divergentes e revalidação do horário ao concluir a revisão e antes de novas inclusões; relatório resumido com contagens de ações, divergências e cadastros pendentes em arquivo privado separado.
+- Cadastro: CPF ausente, zerado ou malformado é distinguido de rejeição HTTP, sem consulta por CPF nem substituição automática; preservada a reposição validada de zeros à esquerda e a confirmação de identificadores não zerados por primeiro nome ou telefone. Recusas de marketing dispensam consultas de pedidos na Recompra e continuam prevalecendo sobre valores afirmativos.
+
+- Rede corporativa: um timeout não desativa o proxy já ativo apenas porque um site público responde. A redetecção repete sondagens e exige resposta HTTPS da URL externa da FarmaLíder antes de migrar para conexão direta, preservando as escolhas explícitas de proxy e sem enviar credenciais na sondagem.
+
+- Filtro farmacêutico: MacroGard e Becordil excluídos também por nomes abreviados; curativos Topz com estampa Patrulha Canina deixam de ser confundidos com produtos animais. A nova política exige nova revisão da Recompra e reconciliação do escopo nas próximas cargas do Analytics/Planilhas.
+- Recompra: bloqueios temporários ao substituir o estado local recebem tentativas limitadas, sem repetir escritas na Weni; bloqueios persistentes preservam o estado anterior e são identificados como falhas locais, com diagnóstico de permissão.
+
+- Looker: conector privado opcional para recalcular a Curva ABC, o resumo e os produtos comprados juntos no período solicitado pelo relatório, com leitura das bases BI e validação de consistência.
+
+- Planilhas: leitura das constantes booleanas `=FALSE()` e `=TRUE()` usadas pelo export original de conversas no campo `is_active`, preservando o filtro de atendimentos encerrados e o bloqueio de outras fórmulas.
+
+- Weni: falhas isoladas não cancelam a carga; pendências de contatos e limpeza ficam para nova conferência na próxima incremental, com recuperação das mensagens anteriores quando necessário.
+
+- Weni: deduplicação integrada à revisão e aplicação das cargas, com validação de CPF, telefone nativo único e propriedade dos pedidos; preservação de recusas, pedidos e valores, limpeza das fontes do Sheets/BI e comprovantes de retomada sem repetir exclusões incertas.
+
 - Frete lançado como item de código 0 e descrição vazia é separado dos produtos quando corresponde ao frete oficial do cabeçalho, sem duplicar o faturamento ou bloquear pedidos válidos.
 
 - Google Sheets: novas linhas gravadas em posições explícitas, sem deslocamento de colunas ou expansão automática de tabelas, com retentativas idempotentes e bloqueio de dados fora do cabeçalho.
